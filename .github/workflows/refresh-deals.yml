@@ -17,6 +17,7 @@ concurrency:
 jobs:
   refresh:
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     environment:
       name: github-pages
@@ -32,25 +33,59 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: 24
+          cache: npm
 
-      - name: Fetch all active supermarket deals
+      - name: Install scraper dependency
+        run: npm install --no-save --no-package-lock cheerio@1.1.2
+
+      - name: Fetch and index all active supermarket deals
         env:
-          PRIJS_PROFEET_API_KEY: ${{ secrets.PRIJS_PROFEET_API_KEY }}
           STRICT_DEALS: "1"
-          DEALS_PAGE_SIZE: "100"
-          DEALS_MAX_PAGES: "150"
-          DEALS_REQUEST_DELAY_MS: "550"
+          DEALS_REQUEST_DELAY_MS: "300"
+          DEALS_REQUEST_TIMEOUT_MS: "45000"
+          DEALS_MAX_RETRIES: "4"
+          DEALS_MAX_PAGES: "400"
         run: node scripts/fetch-deals.mjs
 
-      - name: Commit updated deals
+      - name: Validate generated files
         run: |
-          if git diff --quiet -- site/data/deals.json; then
-            echo "No changes to supermarket deals."
+          node - <<'NODE'
+          const fs = require('fs');
+
+          const deals = JSON.parse(
+            fs.readFileSync('site/data/deals.json', 'utf8')
+          );
+
+          const index = JSON.parse(
+            fs.readFileSync('site/data/deal-index.json', 'utf8')
+          );
+
+          if (!Array.isArray(deals.deals) || deals.deals.length < 100) {
+            throw new Error(
+              `Unexpected deal count: ${deals.deals?.length || 0}`
+            );
+          }
+
+          if (
+            !Array.isArray(index.entries) ||
+            index.entries.length !== deals.deals.length
+          ) {
+            throw new Error('Deal index does not match deals.json.');
+          }
+
+          console.log('Total deals:', deals.meta.count);
+          console.log('By retailer:', deals.meta.retailerCounts);
+          NODE
+
+      - name: Commit updated deal database
+        run: |
+          if git diff --quiet -- site/data/deals.json site/data/deal-index.json; then
+            echo "No deal changes found."
           else
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add site/data/deals.json
-            git commit -m "Update all supermarket deals"
+            git add site/data/deals.json site/data/deal-index.json
+            git commit -m "Update supermarket deal database"
             git push
           fi
 
