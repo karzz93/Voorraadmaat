@@ -23,6 +23,8 @@ import {
   scaledIngredients,
 } from './core.js';
 import { RECIPE_LIBRARY } from './recipes.js';
+import { clearDealsCache, searchDeals, searchShoppingListDeals } from './deals-api.js';
+import { optimizeShoppingList } from './deals-engine.js';
 
 const app = document.querySelector('#app');
 const modal = document.querySelector('#modal');
@@ -33,7 +35,9 @@ const recipeMap = new Map(RECIPE_LIBRARY.map((recipe) => [recipe.id, recipe]));
 let state = loadState();
 let currentView = sessionStorage.getItem('voorraadmaat-view') || 'home';
 let deals = [];
-let dealsMeta = { status: 'loading' };
+let dealsMeta = { status: 'idle' };
+let dealOptimization = null;
+let dealSearchTimer = null;
 let installPrompt = null;
 let undoSnapshot = null;
 let toastTimer = null;
@@ -136,7 +140,8 @@ function handleClick(event) {
       shareShoppingList();
       break;
     case 'refresh-deals':
-      loadDeals({ announce: true });
+      clearDealsCache();
+      loadDeals({ announce: true, force: true });
       break;
     case 'set-deal-store':
       ui.dealStore = target.dataset.store || 'all';
@@ -199,6 +204,10 @@ function handleInput(event) {
   if (target.id === 'deal-search') {
     ui.dealSearch = target.value;
     filterDealCards(target.value);
+    clearTimeout(dealSearchTimer);
+    if (target.value.trim().length >= 2) {
+      dealSearchTimer = setTimeout(() => loadDeals({ query: target.value.trim() }), 450);
+    }
   }
 }
 
@@ -459,8 +468,9 @@ function renderShopping() {
         <button class="button secondary" type="button" data-action="share-shopping" ${active.length ? '' : 'disabled'}>Delen</button>
       </div>
 
-      ${dealsMeta.status === 'error' ? '<div class="notice error">Deals konden niet worden geladen. Je lijst blijft bruikbaar en wordt onder “Geen aanbieding gevonden” gezet.</div>' : ''}
-      ${dealsMeta.status === 'seed' ? '<div class="notice">De repo bevat alleen startdata. De GitHub Action vult na publicatie actuele deals in.</div>' : ''}
+      ${dealsMeta.status === 'loading' ? '<div class="notice">Actuele aanbiedingen voor je lijst worden gezocht…</div>' : ''}
+      ${dealsMeta.status === 'error' ? '<div class="notice error">Live deals konden niet worden geladen. Je lijst blijft volledig bruikbaar.</div>' : ''}
+      ${renderShoppingDealSummary()}
 
       ${active.length
         ? `<div class="grid">${sections}</div>`
@@ -538,11 +548,23 @@ function dealCard(deal) {
 }
 
 function renderDealsStatus() {
-  if (dealsMeta.status === 'loading') return '<div class="notice">Aanbiedingen worden geladen…</div>';
-  if (dealsMeta.status === 'error') return '<div class="notice error">De aanbiedingenfeed is nu niet bereikbaar. Je voorraad en weekmenu werken volledig offline.</div>';
-  if (dealsMeta.status === 'seed') return '<div class="notice">Nog geen actuele feed in deze kopie. Publiceer de repo en voer “Refresh supermarket deals” uit via GitHub Actions.</div>';
+  if (dealsMeta.status === 'idle') return '<div class="notice">Vul een zoekterm in of zet producten op je winkellijst om live aanbiedingen te zoeken.</div>';
+  if (dealsMeta.status === 'loading') return '<div class="notice">Live aanbiedingen worden gezocht…</div>';
+  if (dealsMeta.status === 'error') return '<div class="notice error">De live aanbiedingenservice is nu niet bereikbaar. Je voorraad, recepten en winkellijst blijven offline werken.</div>';
   const activeCount = deals.filter((deal) => isDealActive(deal)).length;
-  return `<div class="notice success">${activeCount} actieve deals geladen via <a href="https://www.prijsprofeet.nl" target="_blank" rel="noreferrer">PrijsProfeet</a>.</div>`;
+  return `<div class="notice success">${activeCount} passende deals live geladen via <a href="https://www.prijsprofeet.nl" target="_blank" rel="noreferrer">PrijsProfeet</a>.</div>`;
+}
+
+function renderShoppingDealSummary() {
+  const plan = dealOptimization?.bestPlan;
+  if (!plan || !plan.assignments?.length) return '';
+
+  const stores = plan.storeLabels.join(' + ');
+  const secondStoreText = dealOptimization.savingsFromSecondStore > 0
+    ? ` Twee winkels besparen naar schatting nog ${formatCurrency(dealOptimization.savingsFromSecondStore)}.`
+    : '';
+
+  return `<div class="notice success"><strong>Slim voorstel:</strong> ${escapeHtml(stores)} · ${plan.matchedItemCount} van ${plan.totalItemCount} producten gekoppeld · actietotaal ${formatCurrency(plan.productTotal)}.${secondStoreText}</div>`;
 }
 
 function renderActivity() {
@@ -634,6 +656,7 @@ function generateShoppingList(announce = true) {
     render();
     showToast('Winkellijst bijgewerkt.');
   }
+  loadDeals();
 }
 
 function markShoppingBought(id) {
@@ -652,6 +675,7 @@ function markShoppingBought(id) {
   saveState();
   render();
   showToast(`${item.name} staat nu in je voorraad.`, true);
+  loadDeals();
 }
 
 function removeShoppingItem(id) {
@@ -662,6 +686,7 @@ function removeShoppingItem(id) {
   saveState();
   render();
   showToast(`${item.name} van de winkellijst verwijderd.`, true);
+  loadDeals();
 }
 
 function addDealToShopping(dealId) {
@@ -686,6 +711,7 @@ function addDealToShopping(dealId) {
   logActivity('shopping', `${deal.name} vanaf deals toegevoegd`);
   saveState();
   showToast('Deal aan winkellijst toegevoegd.', true);
+  loadDeals();
 }
 
 function openImportDialog(initialText = '') {
@@ -823,6 +849,7 @@ function submitShoppingItem(form) {
   modal.close();
   render();
   showToast(`${name} staat op je winkellijst.`, true);
+  loadDeals();
 }
 
 function openRecipeDialog(recipeId) {
@@ -894,6 +921,7 @@ function submitSettings(form) {
   modal.close();
   render();
   showToast('Instellingen opgeslagen.');
+  loadDeals({ force: true });
 }
 
 async function shareShoppingList() {
@@ -932,28 +960,90 @@ async function installApp() {
   modal.showModal();
 }
 
-async function loadDeals({ announce = false } = {}) {
-  dealsMeta = { ...dealsMeta, status: 'loading' };
-  if (currentView === 'deals') render();
-  try {
-    const response = await fetch('./data/deals.json', { cache: 'no-store' });
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const payload = await response.json();
-    const rawDeals = Array.isArray(payload) ? payload : payload.deals || payload.items || [];
-    deals = rawDeals.map(normalizeDeal).filter((deal) => deal.retailer && deal.price != null);
-    dealsMeta = {
-      ...(payload.meta || {}),
-      status: payload.meta?.status || (deals.length ? 'live' : 'seed'),
-      generatedAt: payload.meta?.generatedAt || payload.generatedAt || null,
-    };
-    if (!deals.length && dealsMeta.status !== 'seed') dealsMeta.status = 'seed';
-    if (announce) showToast(`${deals.length} deals geladen.`);
-  } catch (error) {
-    console.error('Deal feed failed', error);
+async function loadDeals({ announce = false, force = false, query = '' } = {}) {
+  const activeShopping = state.shopping.filter((item) => !item.checked);
+  const explicitQuery = String(query || ui.dealSearch || '').trim();
+
+  if (!explicitQuery && !activeShopping.length) {
     deals = [];
-    dealsMeta = { status: 'error', error: String(error) };
-    if (announce) showToast('Deals konden niet worden ververst.');
+    dealOptimization = null;
+    dealsMeta = { status: 'idle', generatedAt: null };
+    render();
+    return;
   }
+
+  dealsMeta = { ...dealsMeta, status: 'loading' };
+  render();
+
+  try {
+    let rawDeals = [];
+    let generatedAt = new Date().toISOString();
+
+    if (explicitQuery) {
+      const payload = await searchDeals(
+        explicitQuery,
+        state.settings.selectedStores,
+        { force }
+      );
+      rawDeals = payload.items || [];
+      generatedAt = payload.retrievedAt || generatedAt;
+    } else {
+      const payload = await searchShoppingListDeals(
+        activeShopping,
+        state.settings.selectedStores,
+        { force }
+      );
+      rawDeals = payload.results.flatMap((result) => result.items || []);
+      generatedAt = payload.retrievedAt || generatedAt;
+    }
+
+    const unique = new Map();
+    for (const rawDeal of rawDeals) {
+      const deal = normalizeDeal(rawDeal);
+      if (!deal.retailer || deal.price == null) continue;
+      const key = `${deal.retailer}|${deal.id}|${deal.price}`;
+      if (!unique.has(key)) unique.set(key, deal);
+    }
+    deals = [...unique.values()];
+
+    const indexEntries = deals.map((deal, index) => ({
+      i: index,
+      r: deal.retailer,
+      n: deal.name,
+      b: deal.brand || '',
+      c: deal.category || '',
+      p: deal.price,
+      o: deal.originalPrice,
+      d: deal.discountPercentage,
+      q: deal.quantity || '',
+      e: deal.ean || '',
+      t: canonicalProductName(`${deal.name} ${deal.brand || ''} ${deal.category || ''}`).split(' ').filter(Boolean),
+    }));
+
+    dealOptimization = activeShopping.length
+      ? optimizeShoppingList(activeShopping, { entries: indexEntries }, {
+          retailers: state.settings.selectedStores,
+          maxStores: 2,
+          visitCost: 2.5,
+        })
+      : null;
+
+    dealsMeta = {
+      status: 'live',
+      generatedAt,
+      query: explicitQuery || null,
+      count: deals.length,
+    };
+
+    if (announce) showToast(`${deals.length} passende deals geladen.`);
+  } catch (error) {
+    console.error('Live deal search failed', error);
+    deals = [];
+    dealOptimization = null;
+    dealsMeta = { status: 'error', error: String(error) };
+    if (announce) showToast('Live deals konden niet worden ververst.');
+  }
+
   render();
 }
 

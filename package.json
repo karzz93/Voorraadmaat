@@ -1,13 +1,12 @@
 {
   "name": "voorraadmaat",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "private": true,
   "type": "module",
-  "description": "Local-first grocery inventory and recipe PWA for Android and GitHub Pages.",
+  "description": "Local-first grocery inventory and recipe PWA with live supermarket deal matching.",
   "scripts": {
     "start": "python3 -m http.server 4173 --directory site",
-    "test": "node --test tests/*.test.mjs",
-    "fetch-deals": "node scripts/fetch-deals.mjs"
+    "test": "node --test tests/*.test.mjs"
   },
   "engines": {
     "node": ">=20"
