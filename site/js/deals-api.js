@@ -12,32 +12,98 @@ export const DEFAULT_RETAILERS = [
 const CACHE_TTL_MS = 30 * 60 * 1000;
 const CACHE_PREFIX = 'voorraadmaat-live-deals:';
 
+export async function loadTopDeals(
+  retailers = DEFAULT_RETAILERS,
+  { force = false } = {}
+) {
+  const normalizedRetailers =
+    normalizeRetailers(retailers);
+
+  const cacheKey =
+    `${CACHE_PREFIX}top|` +
+    normalizedRetailers.join(',');
+
+  if (!force) {
+    const cached = readCache(cacheKey);
+
+    if (cached) {
+      return cached;
+    }
+  }
+
+  const url = new URL(
+    `${DEALS_API_URL}/top`
+  );
+
+  for (const retailer of normalizedRetailers) {
+    url.searchParams.append(
+      'retailer',
+      retailer
+    );
+  }
+
+  const payload = await requestJson(url);
+
+  const result = {
+    type: 'top',
+
+    retailers:
+      Array.isArray(payload.retailers)
+        ? payload.retailers
+        : normalizedRetailers,
+
+    count:
+      Number.isFinite(payload.count)
+        ? payload.count
+        : Array.isArray(payload.items)
+          ? payload.items.length
+          : 0,
+
+    items:
+      Array.isArray(payload.items)
+        ? payload.items
+        : [],
+
+    retrievedAt:
+      payload.retrievedAt ||
+      new Date().toISOString(),
+  };
+
+  writeCache(
+    cacheKey,
+    result
+  );
+
+  return result;
+}
+
 export async function searchDeals(
   query,
   retailers = DEFAULT_RETAILERS,
   { force = false } = {}
 ) {
-  const cleanQuery = String(query || '').trim();
+  const cleanQuery =
+    String(query || '').trim();
 
   if (!cleanQuery) {
     return {
       query: '',
-      retailers,
+      retailers:
+        normalizeRetailers(retailers),
       count: 0,
       items: [],
+      retrievedAt:
+        new Date().toISOString(),
     };
   }
 
-  const normalizedRetailers = [
-    ...new Set(
-      retailers.filter(Boolean)
-    ),
-  ];
+  const normalizedRetailers =
+    normalizeRetailers(retailers);
 
-  const cacheKey = createCacheKey(
-    cleanQuery,
-    normalizedRetailers
-  );
+  const cacheKey =
+    `${CACHE_PREFIX}search|` +
+    `${cleanQuery.toLowerCase()}|` +
+    normalizedRetailers.join(',');
 
   if (!force) {
     const cached = readCache(cacheKey);
@@ -56,56 +122,14 @@ export async function searchDeals(
     cleanQuery
   );
 
-  for (
-    const retailer
-    of normalizedRetailers
-  ) {
+  for (const retailer of normalizedRetailers) {
     url.searchParams.append(
       'retailer',
       retailer
     );
   }
 
-  let response;
-
-  try {
-    response = await fetch(
-      url.toString(),
-      {
-        method: 'GET',
-        headers: {
-          Accept: 'application/json',
-        },
-        cache: 'no-store',
-      }
-    );
-  } catch (error) {
-    throw new Error(
-      `De aanbiedingenservice kon niet worden bereikt: ${
-        error instanceof Error
-          ? error.message
-          : String(error)
-      }`
-    );
-  }
-
-  let payload;
-
-  try {
-    payload = await response.json();
-  } catch {
-    throw new Error(
-      'De aanbiedingenservice gaf geen geldige JSON terug.'
-    );
-  }
-
-  if (!response.ok) {
-    throw new Error(
-      payload?.details ||
-      payload?.error ||
-      `De aanbiedingenservice gaf status ${response.status}.`
-    );
-  }
+  const payload = await requestJson(url);
 
   const result = {
     query:
@@ -128,6 +152,15 @@ export async function searchDeals(
       Array.isArray(payload.items)
         ? payload.items
         : [],
+
+    attempts:
+      Array.isArray(payload.attempts)
+        ? payload.attempts
+        : [],
+
+    retrievedAt:
+      payload.retrievedAt ||
+      new Date().toISOString(),
   };
 
   writeCache(
@@ -143,128 +176,201 @@ export async function searchShoppingListDeals(
   retailers = DEFAULT_RETAILERS,
   { force = false } = {}
 ) {
+  const normalizedRetailers =
+    normalizeRetailers(retailers);
+
   const queries = [
     ...new Set(
       shoppingItems
-        .map((item) =>
-          typeof item === 'string'
-            ? item
-            : item.name ||
-              item.product ||
-              item.label ||
-              ''
-        )
+        .map((item) => {
+          if (typeof item === 'string') {
+            return item;
+          }
+
+          return (
+            item.key ||
+            item.name ||
+            item.product ||
+            item.label ||
+            ''
+          );
+        })
         .map((value) =>
-          String(value).trim()
+          String(value || '').trim()
         )
         .filter(Boolean)
     ),
-  ];
+  ].slice(0, 30);
 
   if (!queries.length) {
     return {
-      retailers,
+      retailers:
+        normalizedRetailers,
+
       retrievedAt:
         new Date().toISOString(),
+
       results: [],
     };
   }
 
+  const results = [];
+
   /*
-   * Use individual searches rather than /batch.
-   * This reuses the browser cache and gives one product
-   * failure without failing the complete shopping list.
+   * Search each shopping-list item separately.
+   * This allows caching per item and prevents one
+   * failed search from breaking the complete list.
    */
-  const settled =
-    await Promise.allSettled(
-      queries.map((query) =>
-        searchDeals(
+  for (const query of queries) {
+    try {
+      const response =
+        await searchDeals(
           query,
-          retailers,
+          normalizedRetailers,
           { force }
-        )
-      )
-    );
+        );
 
-  const results =
-    settled.map(
-      (result, index) => {
-        if (
-          result.status ===
-          'fulfilled'
-        ) {
-          return {
-            query:
-              queries[index],
-            count:
-              result.value.count,
-            items:
-              result.value.items,
-          };
-        }
+      results.push({
+        query,
+        count:
+          response.items.length,
+        items:
+          response.items,
+      });
+    } catch (error) {
+      console.warn(
+        `Deal search failed for "${query}"`,
+        error
+      );
 
-        return {
-          query:
-            queries[index],
-          count: 0,
-          items: [],
-          error:
-            result.reason instanceof Error
-              ? result.reason.message
-              : String(
-                  result.reason
-                ),
-        };
-      }
-    );
+      results.push({
+        query,
+        count: 0,
+        items: [],
+        error:
+          getErrorMessage(error),
+      });
+    }
+  }
 
   return {
-    retailers,
+    retailers:
+      normalizedRetailers,
+
     retrievedAt:
       new Date().toISOString(),
+
     results,
   };
 }
 
 export function clearDealsCache() {
-  const keys = [];
+  try {
+    const keys = [];
 
-  for (
-    let index = 0;
-    index < localStorage.length;
-    index += 1
-  ) {
-    const key =
-      localStorage.key(index);
-
-    if (
-      key &&
-      key.startsWith(
-        CACHE_PREFIX
-      )
+    for (
+      let index = 0;
+      index < localStorage.length;
+      index += 1
     ) {
-      keys.push(key);
-    }
-  }
+      const key =
+        localStorage.key(index);
 
-  for (const key of keys) {
-    localStorage.removeItem(key);
+      if (
+        key &&
+        key.startsWith(
+          CACHE_PREFIX
+        )
+      ) {
+        keys.push(key);
+      }
+    }
+
+    for (const key of keys) {
+      localStorage.removeItem(key);
+    }
+  } catch {
+    /*
+     * Local storage is optional.
+     * Live search still works without it.
+     */
   }
 }
 
-function createCacheKey(
-  query,
+async function requestJson(url) {
+  let response;
+
+  try {
+    response = await fetch(
+      url.toString(),
+      {
+        method: 'GET',
+
+        headers: {
+          Accept:
+            'application/json',
+        },
+
+        cache: 'no-store',
+      }
+    );
+  } catch (error) {
+    throw new Error(
+      'De live aanbiedingenservice kon niet worden bereikt. ' +
+      getErrorMessage(error)
+    );
+  }
+
+  let payload;
+
+  try {
+    payload =
+      await response.json();
+  } catch {
+    throw new Error(
+      'De aanbiedingenservice gaf geen geldige JSON terug.'
+    );
+  }
+
+  if (!response.ok) {
+    throw new Error(
+      payload?.details ||
+      payload?.error ||
+      `De aanbiedingenservice gaf status ${response.status}.`
+    );
+  }
+
+  return payload;
+}
+
+function normalizeRetailers(
   retailers
 ) {
-  return (
-    CACHE_PREFIX +
-    JSON.stringify({
-      query:
-        query.toLowerCase(),
-      retailers:
-        [...retailers].sort(),
-    })
-  );
+  const allowed =
+    new Set(
+      DEFAULT_RETAILERS
+    );
+
+  const values =
+    Array.isArray(retailers)
+      ? retailers
+      : DEFAULT_RETAILERS;
+
+  const normalized = [
+    ...new Set(
+      values
+        .map((value) =>
+          String(value || '').trim()
+        )
+        .filter((retailer) =>
+          allowed.has(retailer)
+        )
+    ),
+  ];
+
+  return normalized.length
+    ? normalized
+    : [...DEFAULT_RETAILERS];
 }
 
 function readCache(key) {
@@ -281,13 +387,11 @@ function readCache(key) {
 
     if (
       !cached ||
+      typeof cached !== 'object' ||
       !cached.savedAt ||
       !cached.value
     ) {
-      localStorage.removeItem(
-        key
-      );
-
+      localStorage.removeItem(key);
       return null;
     }
 
@@ -296,10 +400,7 @@ function readCache(key) {
       cached.savedAt >
       CACHE_TTL_MS
     ) {
-      localStorage.removeItem(
-        key
-      );
-
+      localStorage.removeItem(key);
       return null;
     }
 
@@ -319,10 +420,20 @@ function writeCache(
       JSON.stringify({
         savedAt:
           Date.now(),
+
         value,
       })
     );
   } catch {
-    // The app still works when localStorage is full or unavailable.
+    /*
+     * Ignore private-mode restrictions
+     * and local-storage limits.
+     */
   }
+}
+
+function getErrorMessage(error) {
+  return error instanceof Error
+    ? error.message
+    : String(error);
 }
