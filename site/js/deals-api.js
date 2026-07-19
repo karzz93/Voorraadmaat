@@ -1,5 +1,5 @@
 const DEALS_API_URL =
-  'https://REPLACE-WITH-YOUR-WORKER.workers.dev';
+  'https://voorraadkast-deals.karsmorsink.workers.dev';
 
 const DEFAULT_RETAILERS = [
   'albert_heijn',
