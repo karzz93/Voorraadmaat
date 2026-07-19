@@ -1,4 +1,6 @@
-const CACHE_VERSION = 'voorraadmaat-v3.0.0';
+const CACHE_VERSION =
+  'voorraadmaat-v4.0.0';
+
 const APP_SHELL = [
   '',
   'index.html',
@@ -13,62 +15,194 @@ const APP_SHELL = [
   'icons/icon-512.png',
 ];
 
-self.addEventListener('install', (event) => {
-  event.waitUntil((async () => {
-    const cache = await caches.open(CACHE_VERSION);
-    await cache.addAll(APP_SHELL.map((path) => new URL(path, self.registration.scope).href));
-    await self.skipWaiting();
-  })());
-});
+self.addEventListener(
+  'install',
+  (event) => {
+    event.waitUntil(
+      (async () => {
+        const cache =
+          await caches.open(
+            CACHE_VERSION
+          );
 
-self.addEventListener('activate', (event) => {
-  event.waitUntil((async () => {
-    const keys = await caches.keys();
-    await Promise.all(keys.filter((key) => key.startsWith('voorraadmaat-') && key !== CACHE_VERSION).map((key) => caches.delete(key)));
-    await self.clients.claim();
-  })());
-});
+        await cache.addAll(
+          APP_SHELL.map(
+            (filePath) =>
+              new URL(
+                filePath,
+                self.registration.scope
+              ).href
+          )
+        );
 
-self.addEventListener('fetch', (event) => {
-  const request = event.request;
-  if (request.method !== 'GET') return;
-
-  const url = new URL(request.url);
-  if (url.origin !== self.location.origin) return;
-
-  if (request.mode === 'navigate') {
-    event.respondWith(networkFirstNavigation(request));
-    return;
+        await self.skipWaiting();
+      })()
+    );
   }
+);
 
-  if (url.pathname.endsWith('/data/deals.json')) {
-    event.respondWith(networkFirst(request));
-    return;
+self.addEventListener(
+  'activate',
+  (event) => {
+    event.waitUntil(
+      (async () => {
+        const keys =
+          await caches.keys();
+
+        await Promise.all(
+          keys
+            .filter(
+              (key) =>
+                key.startsWith(
+                  'voorraadmaat-'
+                ) &&
+                key !==
+                  CACHE_VERSION
+            )
+            .map(
+              (key) =>
+                caches.delete(key)
+            )
+        );
+
+        await self.clients.claim();
+      })()
+    );
   }
+);
 
-  event.respondWith(networkFirst(request));
-});
+self.addEventListener(
+  'fetch',
+  (event) => {
+    const request =
+      event.request;
 
-async function networkFirstNavigation(request) {
+    if (
+      request.method !== 'GET'
+    ) {
+      return;
+    }
+
+    const url =
+      new URL(request.url);
+
+    /*
+     * The Cloudflare Worker requests must not
+     * be cached by this service worker.
+     */
+    if (
+      url.origin !==
+      self.location.origin
+    ) {
+      return;
+    }
+
+    if (
+      request.mode ===
+      'navigate'
+    ) {
+      event.respondWith(
+        networkFirstNavigation(
+          request
+        )
+      );
+
+      return;
+    }
+
+    /*
+     * JavaScript should always be checked online
+     * first so updates are received quickly.
+     */
+    if (
+      url.pathname.endsWith(
+        '.js'
+      )
+    ) {
+      event.respondWith(
+        networkFirst(request)
+      );
+
+      return;
+    }
+
+    event.respondWith(
+      networkFirst(request)
+    );
+  }
+);
+
+async function networkFirstNavigation(
+  request
+) {
   try {
-    const response = await fetch(request);
-    const cache = await caches.open(CACHE_VERSION);
-    cache.put(new URL('index.html', self.registration.scope).href, response.clone());
+    const response =
+      await fetch(
+        request,
+        {
+          cache: 'no-store',
+        }
+      );
+
+    if (response.ok) {
+      const cache =
+        await caches.open(
+          CACHE_VERSION
+        );
+
+      await cache.put(
+        new URL(
+          'index.html',
+          self.registration.scope
+        ).href,
+
+        response.clone()
+      );
+    }
+
     return response;
   } catch {
-    return (await caches.match(new URL('index.html', self.registration.scope).href)) || Response.error();
+    return (
+      await caches.match(
+        new URL(
+          'index.html',
+          self.registration.scope
+        ).href
+      )
+    ) || Response.error();
   }
 }
 
-async function networkFirst(request) {
+async function networkFirst(
+  request
+) {
   try {
-    const response = await fetch(request, { cache: 'no-store' });
+    const response =
+      await fetch(
+        request,
+        {
+          cache: 'no-store',
+        }
+      );
+
     if (response.ok) {
-      const cache = await caches.open(CACHE_VERSION);
-      cache.put(request, response.clone());
+      const cache =
+        await caches.open(
+          CACHE_VERSION
+        );
+
+      await cache.put(
+        request,
+        response.clone()
+      );
     }
+
     return response;
   } catch {
-    return (await caches.match(request)) || Response.error();
+    return (
+      await caches.match(
+        request
+      )
+    ) || Response.error();
   }
 }
