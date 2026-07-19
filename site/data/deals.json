@@ -3,8 +3,16 @@
     "status": "seed",
     "generatedAt": null,
     "source": "PrijsProfeet public deals API",
-    "retailers": ["albert_heijn", "dirk", "lidl", "hoogvliet", "plus"],
-    "note": "Run the Refresh supermarket deals GitHub Action after publishing."
+    "retailers": [
+      "albert_heijn",
+      "dirk",
+      "lidl",
+      "hoogvliet",
+      "plus"
+    ],
+    "note": "Run the Refresh supermarket deals GitHub Action after publishing.",
+    "lastRefreshError": "Refresh failed: The API returned no usable deals; existing data was kept.",
+    "lastRefreshAttempt": "2026-07-19T09:03:56.171Z"
   },
   "deals": []
 }
