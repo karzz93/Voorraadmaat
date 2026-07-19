@@ -89,18 +89,67 @@ async function fetchJson(url) {
   return response.json();
 }
 
-function extractDeals(payload, depth = 0) {
-  if (depth > 4 || payload == null) return [];
-  if (Array.isArray(payload)) return payload;
+function extractDeals(payload, depth = 0, inheritedRetailer = null) {
+  if (depth > 6 || payload == null) return [];
+
+  if (Array.isArray(payload)) {
+    return payload.flatMap((item) => {
+      if (item && typeof item === 'object' && inheritedRetailer) {
+        return [{ ...item, retailer: item.retailer || inheritedRetailer }];
+      }
+      return [item];
+    });
+  }
+
   if (typeof payload !== 'object') return [];
 
-  const preferredKeys = ['deals', 'items', 'results', 'products', 'offers', 'data'];
+  const directRetailer =
+    payload.retailer?.slug ||
+    payload.retailer?.name ||
+    payload.retailer ||
+    payload.store?.slug ||
+    payload.store?.name ||
+    payload.store ||
+    payload.supermarket ||
+    inheritedRetailer;
+
+  const preferredKeys = [
+    'deals',
+    'items',
+    'results',
+    'products',
+    'offers',
+    'data',
+    'top_deals',
+    'topDeals'
+  ];
+
   for (const key of preferredKeys) {
-    if (Array.isArray(payload[key])) return payload[key];
-    if (payload[key] && typeof payload[key] === 'object') {
-      const nested = extractDeals(payload[key], depth + 1);
-      if (nested.length) return nested;
-    }
+    if (payload[key] == null) continue;
+
+    const nested = extractDeals(
+      payload[key],
+      depth + 1,
+      directRetailer
+    );
+
+    if (nested.length) return nested;
+  }
+
+  const collected = [];
+
+  for (const [key, value] of Object.entries(payload)) {
+    const retailerFromKey = normalizeRetailer(key);
+    const nextRetailer = retailers.includes(retailerFromKey)
+      ? retailerFromKey
+      : directRetailer;
+
+    const nested = extractDeals(value, depth + 1, nextRetailer);
+    collected.push(...nested);
+  }
+
+  return collected;
+}
   }
 
   const retailerArrays = Object.entries(payload)
