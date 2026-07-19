@@ -22,9 +22,21 @@ import {
   sanitizeState,
   scaledIngredients,
 } from './core.js';
-import { RECIPE_LIBRARY } from './recipes.js';
-import { clearDealsCache, searchDeals, searchShoppingListDeals } from './deals-api.js';
-import { optimizeShoppingList } from './deals-engine.js';
+
+import {
+  RECIPE_LIBRARY,
+} from './recipes.js';
+
+import {
+  clearDealsCache,
+  loadTopDeals,
+  searchDeals,
+  searchShoppingListDeals,
+} from './deals-api.js';
+
+import {
+  optimizeShoppingList,
+} from './deals-engine.js';
 
 const app = document.querySelector('#app');
 const modal = document.querySelector('#modal');
