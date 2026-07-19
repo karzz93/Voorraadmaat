@@ -2,6 +2,7 @@ name: Refresh supermarket deals
 
 on:
   workflow_dispatch:
+
   schedule:
     - cron: "17 4 * * *"
 
@@ -17,7 +18,7 @@ concurrency:
 jobs:
   refresh:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 45
 
     environment:
       name: github-pages
@@ -35,56 +36,132 @@ jobs:
           node-version: 24
 
       - name: Install scraper dependency
-        run: npm install --no-save --no-package-lock cheerio@1.1.2
+        run: |
+          npm install \
+            --no-save \
+            --no-package-lock \
+            cheerio@1.1.2
 
-      - name: Fetch and index all active supermarket deals
+      - name: Fetch and index supermarket deals
         env:
           STRICT_DEALS: "1"
-          DEALS_REQUEST_DELAY_MS: "300"
+          DEALS_REQUEST_DELAY_MS: "400"
           DEALS_REQUEST_TIMEOUT_MS: "45000"
           DEALS_MAX_RETRIES: "4"
-          DEALS_MAX_PAGES: "400"
-        run: node scripts/fetch-deals.mjs
+          DEALS_MAX_PAGES: "300"
+          DEALS_MINIMUM_TOTAL: "100"
+        run: |
+          node scripts/fetch-deals.mjs
 
-      - name: Validate generated files
+      - name: Validate generated deal files
         run: |
           node - <<'NODE'
           const fs = require('fs');
 
+          const dealsPath =
+            'site/data/deals.json';
+
+          const indexPath =
+            'site/data/deal-index.json';
+
+          if (!fs.existsSync(dealsPath)) {
+            throw new Error(
+              'site/data/deals.json was not generated.'
+            );
+          }
+
+          if (!fs.existsSync(indexPath)) {
+            throw new Error(
+              'site/data/deal-index.json was not generated.'
+            );
+          }
+
           const deals = JSON.parse(
-            fs.readFileSync('site/data/deals.json', 'utf8')
+            fs.readFileSync(
+              dealsPath,
+              'utf8'
+            )
           );
 
           const index = JSON.parse(
-            fs.readFileSync('site/data/deal-index.json', 'utf8')
+            fs.readFileSync(
+              indexPath,
+              'utf8'
+            )
           );
 
-          if (!Array.isArray(deals.deals) || deals.deals.length < 100) {
+          if (
+            !Array.isArray(deals.deals)
+          ) {
             throw new Error(
-              `Unexpected deal count: ${deals.deals?.length || 0}`
+              'deals.json does not contain a deals array.'
             );
           }
 
           if (
-            !Array.isArray(index.entries) ||
-            index.entries.length !== deals.deals.length
+            deals.deals.length < 100
           ) {
-            throw new Error('Deal index does not match deals.json.');
+            throw new Error(
+              `Unexpected deal count: ${deals.deals.length}`
+            );
           }
 
-          console.log('Total deals:', deals.meta.count);
-          console.log('By retailer:', deals.meta.retailerCounts);
+          if (
+            !Array.isArray(index.entries)
+          ) {
+            throw new Error(
+              'deal-index.json does not contain an entries array.'
+            );
+          }
+
+          if (
+            index.entries.length !==
+            deals.deals.length
+          ) {
+            throw new Error(
+              'The deal index count does not match deals.json.'
+            );
+          }
+
+          console.log(
+            'Total deals:',
+            deals.deals.length
+          );
+
+          console.log(
+            'Deals by retailer:',
+            deals.meta.retailerCounts
+          );
+
+          console.log(
+            'Retailer status:',
+            deals.meta.retailerStats
+          );
           NODE
 
       - name: Commit updated deal database
         run: |
-          if git diff --quiet -- site/data/deals.json site/data/deal-index.json; then
+          if git diff --quiet -- \
+            site/data/deals.json \
+            site/data/deal-index.json
+          then
             echo "No deal changes found."
           else
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add site/data/deals.json site/data/deal-index.json
-            git commit -m "Update supermarket deal database"
+            git config \
+              user.name \
+              "github-actions[bot]"
+
+            git config \
+              user.email \
+              "41898282+github-actions[bot]@users.noreply.github.com"
+
+            git add \
+              site/data/deals.json \
+              site/data/deal-index.json
+
+            git commit \
+              -m "Update supermarket deal database"
+
             git push
           fi
 
