@@ -1,4 +1,4 @@
-const CACHE_VERSION = 'voorraadmaat-v2.0.0';
+const CACHE_VERSION = 'voorraadmaat-v3.0.0';
 const APP_SHELL = [
   '',
   'index.html',
