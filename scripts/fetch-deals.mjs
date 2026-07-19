@@ -8,6 +8,8 @@ import { fileURLToPath } from 'node:url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 const OUTPUT_PATH = path.resolve(__dirname, '../site/data/deals.json');
+const INDEX_PATH = path.resolve(__dirname, '../site/data/deal-index.json');
+
 const SEARCH_ENDPOINT =
   process.env.DEALS_API_URL ||
   'https://www.prijsprofeet.nl/api/v1/search';
@@ -22,10 +24,7 @@ const RETAILERS = [
 
 const API_KEY = process.env.PRIJS_PROFEET_API_KEY || '';
 const PAGE_SIZE = positiveInteger(process.env.DEALS_PAGE_SIZE, 100);
-const MAX_PAGES_PER_RETAILER = positiveInteger(
-  process.env.DEALS_MAX_PAGES,
-  150
-);
+const MAX_PAGES = positiveInteger(process.env.DEALS_MAX_PAGES, 150);
 const REQUEST_DELAY_MS = positiveInteger(
   process.env.DEALS_REQUEST_DELAY_MS,
   550
@@ -35,7 +34,7 @@ const repository = process.env.GITHUB_REPOSITORY
   ? `https://github.com/${process.env.GITHUB_REPOSITORY}`
   : 'https://github.com/your-name/voorraadmaat';
 
-const USER_AGENT = `Voorraadmaat/2.0 (+${repository})`;
+const USER_AGENT = `Voorraadmaat/3.0 (+${repository})`;
 
 main().catch(async (error) => {
   console.error(`Deals refresh failed: ${error.stack || error}`);
@@ -49,10 +48,9 @@ main().catch(async (error) => {
 });
 
 async function main() {
-  console.log('Starting complete supermarket-deal refresh.');
+  console.log('Refreshing complete supermarket deal database.');
   console.log(`Endpoint: ${SEARCH_ENDPOINT}`);
   console.log(`Retailers: ${RETAILERS.join(', ')}`);
-  console.log(`Page size: ${PAGE_SIZE}`);
   console.log(`API key configured: ${API_KEY ? 'yes' : 'no'}`);
 
   const allDeals = [];
@@ -69,27 +67,17 @@ async function main() {
     };
 
     allDeals.push(...result.deals);
-
-    console.log(
-      `${retailer}: ${result.deals.length} usable deals from ` +
-      `${result.rawItems} raw items in ${result.requests} request(s).`
-    );
   }
 
   const deals = deduplicate(allDeals)
-    .filter(
-      (deal) =>
-        RETAILERS.includes(deal.retailer) &&
-        deal.name &&
-        deal.price != null
-    )
-    .sort(
-      (a, b) =>
-        a.retailer.localeCompare(b.retailer) ||
-        (b.discountPercentage || 0) -
-          (a.discountPercentage || 0) ||
-        a.name.localeCompare(b.name, 'nl')
+    .filter(isUsableDeal)
+    .sort(sortDeals);
+
+  if (!deals.length) {
+    throw new Error(
+      'The API returned no usable deals; existing data was kept.'
     );
+  }
 
   const coveredRetailers = [
     ...new Set(deals.map((deal) => deal.retailer)),
@@ -99,17 +87,8 @@ async function main() {
     (retailer) => !coveredRetailers.includes(retailer)
   );
 
-  if (!deals.length) {
-    throw new Error(
-      'The API returned no usable deals; existing data was kept.'
-    );
-  }
-
-  if (missingRetailers.length) {
-    console.warn(
-      `No usable deals found for: ${missingRetailers.join(', ')}`
-    );
-  }
+  const categoryCounts = countBy(deals, (deal) => deal.category || 'Overig');
+  const retailerCounts = countBy(deals, (deal) => deal.retailer);
 
   const output = {
     meta: {
@@ -123,48 +102,59 @@ async function main() {
       missingRetailers,
       count: deals.length,
       retailerStats,
+      retailerCounts,
+      categoryCounts,
       attributionRequired: true,
+      note: 'Prices are indicative; verify with the retailer.',
     },
     deals,
   };
 
+  const index = buildDealIndex(deals);
+
   await mkdir(path.dirname(OUTPUT_PATH), { recursive: true });
-  await writeFile(
-    OUTPUT_PATH,
-    `${JSON.stringify(output, null, 2)}\n`,
-    'utf8'
-  );
+
+  await Promise.all([
+    writeFile(
+      OUTPUT_PATH,
+      `${JSON.stringify(output, null, 2)}\n`,
+      'utf8'
+    ),
+    writeFile(
+      INDEX_PATH,
+      `${JSON.stringify(index)}\n`,
+      'utf8'
+    ),
+  ]);
 
   console.log(`Wrote ${deals.length} deals to ${OUTPUT_PATH}.`);
+  console.log(
+    `Wrote compact matching index with ${index.entries.length} entries to ${INDEX_PATH}.`
+  );
 }
 
 async function fetchAllDealsForRetailer(retailer) {
-  /*
-   * The public documentation confirms a search endpoint, but its rendered
-   * docs may evolve. This client supports common page-, offset-, and
-   * cursor-based response formats and stops if an API ignores pagination.
-   */
-  let paginationMode = 'page';
+  let mode = 'page';
   let page = 1;
   let offset = 0;
   let cursor = null;
   let requests = 0;
   let rawItems = 0;
-  const deals = [];
-  const seenPageFingerprints = new Set();
 
-  while (requests < MAX_PAGES_PER_RETAILER) {
+  const deals = [];
+  const seenFingerprints = new Set();
+
+  while (requests < MAX_PAGES) {
     const url = buildSearchUrl({
       retailer,
-      paginationMode,
+      mode,
       page,
       offset,
       cursor,
     });
 
     console.log(
-      `${retailer}: request ${requests + 1} ` +
-      `(${paginationMode}; page=${page}; offset=${offset})`
+      `${retailer}: request ${requests + 1} (${mode}, page ${page}, offset ${offset})`
     );
 
     const payload = await fetchJson(url);
@@ -173,28 +163,26 @@ async function fetchAllDealsForRetailer(retailer) {
     const items = extractSearchItems(payload);
     const fingerprint = createPageFingerprint(items);
 
-    if (items.length && seenPageFingerprints.has(fingerprint)) {
-      if (paginationMode === 'page' && requests === 2) {
+    if (items.length && seenFingerprints.has(fingerprint)) {
+      if (mode === 'page' && requests === 2) {
         console.warn(
-          `${retailer}: page parameter appears to be ignored; ` +
-          'retrying with offset pagination.'
+          `${retailer}: page pagination appears ignored; switching to offset.`
         );
 
-        paginationMode = 'offset';
-        page = 1;
+        mode = 'offset';
         offset = PAGE_SIZE;
         cursor = null;
         continue;
       }
 
       console.warn(
-        `${retailer}: repeated page detected; stopping to avoid a loop.`
+        `${retailer}: repeated page detected; stopping safely.`
       );
       break;
     }
 
     if (items.length) {
-      seenPageFingerprints.add(fingerprint);
+      seenFingerprints.add(fingerprint);
     }
 
     rawItems += items.length;
@@ -215,8 +203,7 @@ async function fetchAllDealsForRetailer(retailer) {
     deals.push(...normalized);
 
     console.log(
-      `${retailer}: received ${items.length} raw item(s), ` +
-      `${normalized.length} usable.`
+      `${retailer}: ${items.length} raw, ${normalized.length} usable.`
     );
 
     const next = determineNextPage({
@@ -225,14 +212,14 @@ async function fetchAllDealsForRetailer(retailer) {
       page,
       offset,
       cursor,
-      mode: paginationMode,
+      mode,
     });
 
     if (!next.hasMore) {
       break;
     }
 
-    paginationMode = next.mode;
+    mode = next.mode;
     page = next.page;
     offset = next.offset;
     cursor = next.cursor;
@@ -242,43 +229,36 @@ async function fetchAllDealsForRetailer(retailer) {
     }
   }
 
-  if (requests >= MAX_PAGES_PER_RETAILER) {
+  if (requests >= MAX_PAGES) {
     throw new Error(
       `Pagination safety limit reached for ${retailer}.`
     );
   }
 
+  console.log(
+    `${retailer}: finished with ${deals.length} usable deals.`
+  );
+
   return {
     deals,
     rawItems,
     requests,
-    paginationMode,
+    paginationMode: mode,
   };
 }
 
-function buildSearchUrl({
-  retailer,
-  paginationMode,
-  page,
-  offset,
-  cursor,
-}) {
+function buildSearchUrl({ retailer, mode, page, offset, cursor }) {
   const url = new URL(SEARCH_ENDPOINT);
 
   url.searchParams.set('retailer', retailer);
-
-  /*
-   * Both names are sent because APIs commonly use either one.
-   * Unknown query parameters are normally ignored.
-   */
   url.searchParams.set('promotion_status', 'active');
   url.searchParams.set('status', 'active');
   url.searchParams.set('limit', String(PAGE_SIZE));
   url.searchParams.set('per_page', String(PAGE_SIZE));
 
-  if (paginationMode === 'cursor' && cursor) {
+  if (mode === 'cursor' && cursor) {
     url.searchParams.set('cursor', cursor);
-  } else if (paginationMode === 'offset') {
+  } else if (mode === 'offset') {
     url.searchParams.set('offset', String(offset));
     url.searchParams.set('skip', String(offset));
   } else {
@@ -303,33 +283,27 @@ async function fetchJson(url) {
     signal: AbortSignal.timeout(45_000),
   });
 
-  const responseText = await response.text();
+  const body = await response.text();
 
   if (!response.ok) {
     throw new Error(
       `${response.status} ${response.statusText}` +
-      (responseText ? `: ${responseText.slice(0, 600)}` : '')
+      (body ? `: ${body.slice(0, 600)}` : '')
     );
   }
 
   try {
-    return JSON.parse(responseText);
+    return JSON.parse(body);
   } catch {
     throw new Error(
-      'The API did not return JSON. Response started with: ' +
-      responseText.slice(0, 400)
+      `The API did not return JSON. Response started with: ${body.slice(0, 400)}`
     );
   }
 }
 
 function extractSearchItems(payload) {
-  if (Array.isArray(payload)) {
-    return payload;
-  }
-
-  if (!payload || typeof payload !== 'object') {
-    return [];
-  }
+  if (Array.isArray(payload)) return payload;
+  if (!payload || typeof payload !== 'object') return [];
 
   const candidates = [
     payload.results,
@@ -352,11 +326,6 @@ function extractSearchItems(payload) {
     }
   }
 
-  /*
-   * As a safe fallback, return the first array whose entries look like
-   * products/deals. This avoids accidentally treating pagination arrays
-   * or unrelated metadata as products.
-   */
   for (const value of Object.values(payload)) {
     if (
       Array.isArray(value) &&
@@ -390,9 +359,7 @@ function determineNextPage({
     pagination.next_cursor,
     pagination.nextCursor,
     payload?.next_cursor,
-    payload?.nextCursor,
-    payload?.links?.next_cursor,
-    payload?.links?.nextCursor
+    payload?.nextCursor
   );
 
   if (nextCursor && nextCursor !== cursor) {
@@ -462,10 +429,6 @@ function determineNextPage({
     };
   }
 
-  /*
-   * Without explicit metadata, a full page probably means another page
-   * exists. A shorter page marks the end.
-   */
   return {
     hasMore: returnedCount >= PAGE_SIZE,
     mode,
@@ -495,9 +458,7 @@ function looksLikeProduct(value) {
 }
 
 function normalizeDeal(raw) {
-  if (!raw || typeof raw !== 'object') {
-    return null;
-  }
+  if (!raw || typeof raw !== 'object') return null;
 
   const representativeProduct =
     raw.representative_product ||
@@ -609,10 +570,32 @@ function normalizeDeal(raw) {
     originalPrice > 0 &&
     price < originalPrice
   ) {
-    discountPercentage = roundMoney(
+    discountPercentage = round2(
       ((originalPrice - price) / originalPrice) * 100
     );
   }
+
+  const rawCategory = firstString(
+    item.category?.name,
+    item.category,
+    item.category_name,
+    item.categoryName,
+    item.product?.category?.name,
+    item.product?.category
+  );
+
+  const category = normalizeCategory(rawCategory, name);
+
+  const searchableText = [
+    name,
+    item.brand,
+    item.quantity,
+    category,
+    item.promotion_type,
+    item.offer_text,
+  ]
+    .filter(Boolean)
+    .join(' ');
 
   return {
     id: String(
@@ -651,14 +634,7 @@ function normalizeDeal(raw) {
       item.content,
       item.product?.quantity
     ),
-    category: firstString(
-      item.category?.name,
-      item.category,
-      item.category_name,
-      item.categoryName,
-      item.product?.category?.name,
-      item.product?.category
-    ),
+    category,
     promotionType: firstString(
       item.promotion_type,
       item.promotionType,
@@ -718,16 +694,67 @@ function normalizeDeal(raw) {
       item.product?.image_url,
       item.product?.imageUrl
     ),
+    searchTokens: tokenize(searchableText),
   };
 }
 
+function buildDealIndex(deals) {
+  const entries = deals.map((deal, index) => ({
+    i: index,
+    r: deal.retailer,
+    n: deal.name,
+    b: deal.brand || '',
+    c: deal.category || 'Overig',
+    p: deal.price,
+    o: deal.originalPrice,
+    d: deal.discountPercentage,
+    q: deal.quantity || '',
+    e: deal.ean || '',
+    t: deal.searchTokens,
+  }));
+
+  return {
+    version: 1,
+    generatedAt: new Date().toISOString(),
+    retailers: RETAILERS,
+    entries,
+  };
+}
+
+function normalizeCategory(rawCategory, productName) {
+  const text = normalizeText(`${rawCategory || ''} ${productName || ''}`);
+
+  const rules = [
+    ['Groente & Fruit', ['groente', 'fruit', 'appel', 'banaan', 'tomaat', 'aardappel', 'salade']],
+    ['Zuivel & Eieren', ['zuivel', 'melk', 'yoghurt', 'kwark', 'ei', 'eieren', 'boter']],
+    ['Vlees & Gevogelte', ['vlees', 'kip', 'gehakt', 'worst', 'burger', 'biefstuk']],
+    ['Vis & Zeevruchten', ['vis', 'zalm', 'tonijn', 'garnaal', 'zeeproduct']],
+    ['Kaas & Vleeswaren', ['kaas', 'vleeswaren', 'ham', 'salami']],
+    ['Brood & Bakkerij', ['brood', 'bol', 'croissant', 'bakkerij', 'wrap']],
+    ['Ontbijt & Beleg', ['ontbijt', 'muesli', 'cornflakes', 'hagelslag', 'jam', 'pindakaas']],
+    ['Pasta, Rijst & Wereldkeuken', ['pasta', 'rijst', 'noedel', 'couscous', 'tortilla']],
+    ['Soepen, Conserven & Sauzen', ['soep', 'saus', 'conserven', 'blik', 'tomatenblokjes']],
+    ['Snoep, Koek & Chips', ['snoep', 'koek', 'chips', 'chocolade', 'drop']],
+    ['Frisdrank & Sappen', ['frisdrank', 'sap', 'cola', 'limonade', 'water']],
+    ['Koffie & Thee', ['koffie', 'thee', 'capsule']],
+    ['Bier, Wijn & Dranken', ['bier', 'wijn', 'drank', 'alcohol']],
+    ['Diepvries', ['diepvries', 'bevroren', 'ijs']],
+    ['Vega & Plantaardig', ['vega', 'vegan', 'plantaardig', 'tofu']],
+    ['Huishouden & Dier', ['wasmiddel', 'toiletpapier', 'schoonmaak', 'kat', 'hond', 'dier']],
+    ['Drogisterij & Baby', ['shampoo', 'tandpasta', 'deodorant', 'luier', 'baby', 'drogisterij']],
+  ];
+
+  for (const [category, words] of rules) {
+    if (words.some((word) => text.includes(word))) {
+      return category;
+    }
+  }
+
+  return rawCategory || 'Overig';
+}
+
 function normalizeRetailer(value = '') {
-  const normalized = String(value)
-    .toLowerCase()
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .replace(/[^a-z0-9]+/g, '_')
-    .replace(/^_+|_+$/g, '');
+  const normalized = normalizeText(value).replace(/\s+/g, '_');
 
   if (
     normalized === 'ah' ||
@@ -750,6 +777,41 @@ function normalizeRetailer(value = '') {
   }
 
   return normalized;
+}
+
+function tokenize(value) {
+  return [...new Set(
+    normalizeText(value)
+      .split(/\s+/)
+      .filter((token) => token.length >= 2)
+  )];
+}
+
+function normalizeText(value = '') {
+  return String(value)
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+
+function isUsableDeal(deal) {
+  return (
+    deal &&
+    RETAILERS.includes(deal.retailer) &&
+    deal.name &&
+    Number.isFinite(deal.price)
+  );
+}
+
+function sortDeals(a, b) {
+  return (
+    a.retailer.localeCompare(b.retailer) ||
+    (b.discountPercentage || 0) -
+      (a.discountPercentage || 0) ||
+    a.name.localeCompare(b.name, 'nl')
+  );
 }
 
 function firstString(...values) {
@@ -795,16 +857,13 @@ function positiveInteger(value, fallback) {
     : fallback;
 }
 
-function roundMoney(value) {
+function round2(value) {
   return Math.round(value * 100) / 100;
 }
 
 function slugify(value) {
-  return String(value)
-    .toLowerCase()
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .replace(/[^a-z0-9]+/g, '-')
+  return normalizeText(value)
+    .replace(/\s+/g, '-')
     .replace(/^-+|-+$/g, '')
     .slice(0, 100);
 }
@@ -829,8 +888,18 @@ function deduplicate(items) {
   return [...map.values()];
 }
 
+function countBy(items, selector) {
+  return Object.fromEntries(
+    [...items.reduce((map, item) => {
+      const key = selector(item);
+      map.set(key, (map.get(key) || 0) + 1);
+      return map;
+    }, new Map()).entries()].sort((a, b) => b[1] - a[1])
+  );
+}
+
 function createPageFingerprint(items) {
-  const sample = items.slice(0, 8).map((item) => {
+  return items.slice(0, 8).map((item) => {
     const product =
       item?.representative_product ||
       item?.representativeProduct ||
@@ -853,9 +922,7 @@ function createPageFingerprint(items) {
         product.current_price ||
         '',
     ].join(':');
-  });
-
-  return sample.join('|');
+  }).join('|');
 }
 
 function sleep(milliseconds) {
