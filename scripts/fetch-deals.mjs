@@ -24,20 +24,16 @@ const retailers = [
   'plus',
 ];
 
-const apiKey =
-  process.env.PRIJS_PROFEET_API_KEY || '';
+const apiKey = process.env.PRIJS_PROFEET_API_KEY || '';
 
 const repository = process.env.GITHUB_REPOSITORY
   ? `https://github.com/${process.env.GITHUB_REPOSITORY}`
   : 'https://github.com/your-name/voorraadmaat';
 
-const userAgent =
-  `Voorraadmaat/1.1 (+${repository})`;
+const userAgent = `Voorraadmaat/1.2 (+${repository})`;
 
 main().catch(async (error) => {
-  console.error(
-    `Deals refresh failed: ${error.stack || error}`
-  );
+  console.error(`Deals refresh failed: ${error.stack || error}`);
 
   if (process.env.STRICT_DEALS === '1') {
     process.exitCode = 1;
@@ -53,30 +49,19 @@ async function main() {
   console.log('Starting supermarket deal refresh.');
   console.log(`Endpoint: ${endpoint}`);
   console.log(`Retailers: ${retailers.join(', ')}`);
-  console.log(
-    `API key configured: ${apiKey ? 'yes' : 'no'}`
-  );
+  console.log(`API key configured: ${apiKey ? 'yes' : 'no'}`);
 
-  /*
-   * First try one combined request containing all retailers.
-   */
   const combinedUrl = new URL(endpoint);
 
   for (const retailer of retailers) {
-    combinedUrl.searchParams.append(
-      'retailer',
-      retailer
-    );
+    combinedUrl.searchParams.append('retailer', retailer);
   }
 
   let deals = [];
 
   try {
-    const combinedPayload =
-      await fetchJson(combinedUrl);
-
-    const extracted =
-      extractDeals(combinedPayload);
+    const payload = await fetchJson(combinedUrl);
+    const extracted = extractDeals(payload);
 
     console.log(
       `Combined response contained ${extracted.length} candidate item(s).`
@@ -88,14 +73,9 @@ async function main() {
         .filter(Boolean)
     );
   } catch (error) {
-    console.warn(
-      `Combined request failed: ${error.message}`
-    );
+    console.warn(`Combined request failed: ${error.message}`);
   }
 
-  /*
-   * Determine which supermarkets are still missing.
-   */
   let coveredRetailers = new Set(
     deals.map((deal) => deal.retailer)
   );
@@ -104,10 +84,6 @@ async function main() {
     (retailer) => !coveredRetailers.has(retailer)
   );
 
-  /*
-   * If the combined request yielded nothing, request every
-   * retailer separately. Otherwise request only missing ones.
-   */
   if (!deals.length || missingRetailers.length) {
     const retailersToFetch = deals.length
       ? missingRetailers
@@ -118,42 +94,35 @@ async function main() {
     );
 
     const results = await Promise.allSettled(
-      retailersToFetch.map(
-        async (retailer) => {
-          const url = new URL(endpoint);
+      retailersToFetch.map(async (retailer) => {
+        const url = new URL(endpoint);
+        url.searchParams.set('retailer', retailer);
 
-          url.searchParams.set(
-            'retailer',
-            retailer
-          );
+        const payload = await fetchJson(url);
 
-          const payload =
-            await fetchJson(url);
+        const extracted = extractDeals(
+          payload,
+          0,
+          retailer
+        );
 
-          const extracted = extractDeals(
-            payload,
-            0,
-            retailer
-          );
+        console.log(
+          `${retailer}: extracted ${extracted.length} candidate item(s).`
+        );
 
-          console.log(
-            `${retailer}: extracted ${extracted.length} candidate item(s).`
-          );
-
-          return extracted
-            .map((raw) =>
-              normalizeDeal({
-                ...raw,
-                retailer:
-                  raw?.retailer ||
-                  raw?.retailer_slug ||
-                  raw?.retailerSlug ||
-                  retailer,
-              })
-            )
-            .filter(Boolean);
-        }
-      )
+        return extracted
+          .map((raw) =>
+            normalizeDeal({
+              ...raw,
+              retailer:
+                raw?.retailer ||
+                raw?.retailer_slug ||
+                raw?.retailerSlug ||
+                retailer,
+            })
+          )
+          .filter(Boolean);
+      })
     );
 
     for (let index = 0; index < results.length; index += 1) {
@@ -169,17 +138,13 @@ async function main() {
       } else {
         console.warn(
           `${retailer} request failed: ${
-            result.reason?.message ||
-            result.reason
+            result.reason?.message || result.reason
           }`
         );
       }
     }
   }
 
-  /*
-   * Remove duplicate offers and discard unusable data.
-   */
   deals = deduplicate(deals)
     .filter(
       (deal) =>
@@ -203,9 +168,7 @@ async function main() {
     (retailer) => !coveredRetailers.has(retailer)
   );
 
-  console.log(
-    `Final usable deal count: ${deals.length}`
-  );
+  console.log(`Final usable deal count: ${deals.length}`);
 
   console.log(
     `Retailers found: ${
@@ -230,12 +193,10 @@ async function main() {
       status: 'live',
       generatedAt: new Date().toISOString(),
       source: 'PrijsProfeet public deals API',
-      sourceUrl:
-        'https://www.prijsprofeet.nl',
+      sourceUrl: 'https://www.prijsprofeet.nl',
       endpoint,
       retailers,
-      coveredRetailers:
-        [...coveredRetailers],
+      coveredRetailers: [...coveredRetailers],
       missingRetailers,
       count: deals.length,
       attributionRequired: true,
@@ -262,8 +223,6 @@ async function fetchJson(url) {
 
   if (apiKey) {
     headers['X-API-Key'] = apiKey;
-    headers.Authorization =
-      `Bearer ${apiKey}`;
   }
 
   console.log(`Requesting: ${url}`);
@@ -273,17 +232,16 @@ async function fetchJson(url) {
     signal: AbortSignal.timeout(30_000),
   });
 
-  const responseText =
-    await response.text();
+  const responseText = await response.text();
 
   if (!response.ok) {
     throw new Error(
       `${response.status} ${response.statusText}` +
-      (
-        responseText
-          ? `: ${responseText.slice(0, 500)}`
-          : ''
-      )
+        (
+          responseText
+            ? `: ${responseText.slice(0, 500)}`
+            : ''
+        )
     );
   }
 
@@ -301,10 +259,6 @@ async function fetchJson(url) {
     `Response structure: ${describePayload(payload)}`
   );
 
-  /*
-   * This sample is useful while troubleshooting. It is
-   * deliberately limited so the workflow log stays readable.
-   */
   console.log(
     `Response sample: ${JSON.stringify(payload).slice(0, 1500)}`
   );
@@ -317,10 +271,7 @@ function describePayload(payload) {
     return `array with ${payload.length} item(s)`;
   }
 
-  if (
-    payload &&
-    typeof payload === 'object'
-  ) {
+  if (payload && typeof payload === 'object') {
     const keys = Object.keys(payload);
 
     return `object with keys: ${
@@ -336,30 +287,24 @@ function extractDeals(
   depth = 0,
   inheritedRetailer = null
 ) {
-  if (
-    depth > 8 ||
-    payload == null
-  ) {
+  if (depth > 8 || payload == null) {
     return [];
   }
 
   if (Array.isArray(payload)) {
     return payload.flatMap((item) => {
-      if (
-        item &&
-        typeof item === 'object'
-      ) {
-        return [{
-          ...item,
-          retailer:
-            item.retailer ||
-            item.retailer_slug ||
-            item.retailerSlug ||
-            inheritedRetailer,
-        }];
+      if (!item || typeof item !== 'object') {
+        return [];
       }
 
-      return [];
+      return [{
+        ...item,
+        retailer:
+          item.retailer ||
+          item.retailer_slug ||
+          item.retailerSlug ||
+          inheritedRetailer,
+      }];
     });
   }
 
@@ -367,10 +312,6 @@ function extractDeals(
     return [];
   }
 
-  /*
-   * If the object itself already looks like a deal,
-   * return it directly.
-   */
   if (looksLikeDeal(payload)) {
     return [{
       ...payload,
@@ -397,6 +338,8 @@ function extractDeals(
     inheritedRetailer;
 
   const preferredKeys = [
+    'top_by_percentage',
+    'top_by_amount',
     'deals',
     'items',
     'results',
@@ -411,36 +354,28 @@ function extractDeals(
     'entries',
   ];
 
-  /*
-   * Prefer likely result containers first.
-   */
+  const collected = [];
+
   for (const key of preferredKeys) {
     if (payload[key] == null) {
       continue;
     }
 
-    const nested = extractDeals(
-      payload[key],
-      depth + 1,
-      directRetailer
+    collected.push(
+      ...extractDeals(
+        payload[key],
+        depth + 1,
+        directRetailer
+      )
     );
-
-    if (nested.length) {
-      return nested;
-    }
   }
 
-  /*
-   * Otherwise inspect every property recursively.
-   */
-  const collected = [];
+  if (collected.length) {
+    return collected;
+  }
 
-  for (
-    const [key, value]
-    of Object.entries(payload)
-  ) {
-    const retailerFromKey =
-      normalizeRetailer(key);
+  for (const [key, value] of Object.entries(payload)) {
+    const retailerFromKey = normalizeRetailer(key);
 
     const nextRetailer =
       retailers.includes(retailerFromKey)
@@ -468,33 +403,29 @@ function looksLikeDeal(value) {
     return false;
   }
 
+  if (
+    value.representative_product ||
+    value.representativeProduct
+  ) {
+    return true;
+  }
+
   const hasName = Boolean(
     value.name ||
     value.title ||
     value.product_name ||
     value.productName ||
-    value.display_name ||
-    value.displayName ||
     value.description ||
-    value.product?.name ||
-    value.product?.title
+    value.product?.name
   );
 
   const hasPrice = [
     value.price,
-    value.deal_price,
-    value.dealPrice,
     value.current_price,
     value.currentPrice,
     value.offer_price,
     value.offerPrice,
-    value.sale_price,
-    value.salePrice,
-    value.discount_price,
-    value.discountPrice,
     value.product?.price,
-    value.product?.deal_price,
-    value.product?.dealPrice,
   ].some(
     (candidate) =>
       candidate !== undefined &&
@@ -506,59 +437,85 @@ function looksLikeDeal(value) {
 }
 
 function normalizeDeal(raw) {
-  if (
-    !raw ||
-    typeof raw !== 'object'
-  ) {
+  if (!raw || typeof raw !== 'object') {
     return null;
   }
 
-  const retailerValue =
-    raw.retailer?.slug ||
-    raw.retailer?.name ||
-    raw.retailer ||
-    raw.retailer_slug ||
-    raw.retailerSlug ||
-    raw.store?.slug ||
-    raw.store?.name ||
-    raw.store ||
-    raw.store_name ||
-    raw.storeName ||
-    raw.supermarket?.slug ||
-    raw.supermarket?.name ||
-    raw.supermarket;
+  const representativeProduct =
+    raw.representative_product ||
+    raw.representativeProduct ||
+    null;
 
-  const retailer =
-    normalizeRetailer(retailerValue);
+  const item = representativeProduct
+    ? {
+        ...raw,
+        ...representativeProduct,
+
+        retailer:
+          representativeProduct.retailer ||
+          raw.retailer,
+
+        savings_percentage:
+          representativeProduct.savings_percentage ??
+          raw.savings_percentage,
+
+        savings_amount:
+          representativeProduct.savings_amount ??
+          raw.savings_amount,
+
+        promotion_type:
+          representativeProduct.promotion_type ||
+          raw.promotion_type,
+
+        brand:
+          representativeProduct.brand ||
+          raw.brand,
+      }
+    : raw;
+
+  const retailerValue =
+    item.retailer?.slug ||
+    item.retailer?.name ||
+    item.retailer ||
+    item.retailer_slug ||
+    item.retailerSlug ||
+    item.store?.slug ||
+    item.store?.name ||
+    item.store ||
+    item.store_name ||
+    item.storeName ||
+    item.supermarket?.slug ||
+    item.supermarket?.name ||
+    item.supermarket;
+
+  const retailer = normalizeRetailer(retailerValue);
 
   const name = firstString(
-    raw.name,
-    raw.title,
-    raw.product_name,
-    raw.productName,
-    raw.display_name,
-    raw.displayName,
-    raw.description,
-    raw.product?.name,
-    raw.product?.title,
-    raw.product?.description
+    item.name,
+    item.title,
+    item.product_name,
+    item.productName,
+    item.display_name,
+    item.displayName,
+    item.description,
+    item.product?.name,
+    item.product?.title,
+    item.product?.description
   );
 
   const price = numberOrNull(
-    raw.price ??
-    raw.deal_price ??
-    raw.dealPrice ??
-    raw.current_price ??
-    raw.currentPrice ??
-    raw.offer_price ??
-    raw.offerPrice ??
-    raw.sale_price ??
-    raw.salePrice ??
-    raw.discount_price ??
-    raw.discountPrice ??
-    raw.product?.price ??
-    raw.product?.deal_price ??
-    raw.product?.dealPrice
+    item.price ??
+    item.deal_price ??
+    item.dealPrice ??
+    item.current_price ??
+    item.currentPrice ??
+    item.offer_price ??
+    item.offerPrice ??
+    item.sale_price ??
+    item.salePrice ??
+    item.discount_price ??
+    item.discountPrice ??
+    item.product?.price
   );
 
   if (
@@ -571,26 +528,28 @@ function normalizeDeal(raw) {
   }
 
   const originalPrice = numberOrNull(
-    raw.original_price ??
-    raw.originalPrice ??
-    raw.regular_price ??
-    raw.regularPrice ??
-    raw.normal_price ??
-    raw.normalPrice ??
-    raw.list_price ??
-    raw.listPrice ??
-    raw.was_price ??
-    raw.wasPrice ??
-    raw.product?.original_price ??
-    raw.product?.originalPrice
+    item.original_price ??
+    item.originalPrice ??
+    item.regular_price ??
+    item.regularPrice ??
+    item.normal_price ??
+    item.normalPrice ??
+    item.list_price ??
+    item.listPrice ??
+    item.was_price ??
+    item.wasPrice ??
+    item.product?.original_price ??
+    item.product?.originalPrice
   );
 
   let discountPercentage = numberOrNull(
-    raw.discount_percentage ??
-    raw.discountPercentage ??
-    raw.discount_percent ??
-    raw.discountPercent ??
-    raw.discount
+    item.savings_percentage ??
+    item.savingsPercentage ??
+    item.discount_percentage ??
+    item.discountPercentage ??
+    item.discount_percent ??
+    item.discountPercent ??
+    item.discount
   );
 
   if (
@@ -599,126 +558,125 @@ function normalizeDeal(raw) {
     originalPrice > 0 &&
     price < originalPrice
   ) {
-    discountPercentage =
-      Math.round(
-        (
-          (
-            originalPrice - price
-          ) /
-          originalPrice
-        ) *
-        100
-      );
+    discountPercentage = Math.round(
+      ((originalPrice - price) / originalPrice) * 100
+    );
   }
 
   const validFrom = firstString(
-    raw.valid_from,
-    raw.validFrom,
-    raw.start_date,
-    raw.startDate,
-    raw.starts_at,
-    raw.startsAt,
-    raw.promotion?.valid_from,
-    raw.promotion?.validFrom
+    item.valid_from,
+    item.validFrom,
+    item.start_date,
+    item.startDate,
+    item.starts_at,
+    item.startsAt,
+    item.promotion?.valid_from,
+    item.promotion?.validFrom
   );
 
   const validUntil = firstString(
-    raw.valid_until,
-    raw.validUntil,
-    raw.end_date,
-    raw.endDate,
-    raw.ends_at,
-    raw.endsAt,
-    raw.promotion?.valid_until,
-    raw.promotion?.validUntil
+    item.valid_until,
+    item.validUntil,
+    item.end_date,
+    item.endDate,
+    item.ends_at,
+    item.endsAt,
+    item.promotion?.valid_until,
+    item.promotion?.validUntil
   );
 
   return {
     id: String(
-      raw.id ||
-      raw.deal_id ||
-      raw.dealId ||
-      raw.product_id ||
-      raw.productId ||
-      raw.product?.id ||
+      item.id ||
+      item.deal_id ||
+      item.dealId ||
+      item.product_id ||
+      item.productId ||
+      item.product?.id ||
       `${retailer}-${slugify(name)}-${price}`
     ),
 
     retailer,
     name,
+    brand: firstString(item.brand),
     price,
     originalPrice,
     discountPercentage,
 
+    savingsAmount: numberOrNull(
+      item.savings_amount ??
+      item.savingsAmount
+    ),
+
     unitPrice: firstString(
-      raw.unit_price,
-      raw.unitPrice,
-      raw.price_per_unit,
-      raw.pricePerUnit,
-      raw.product?.unit_price,
-      raw.product?.unitPrice
+      item.unit_price,
+      item.unitPrice,
+      item.price_per_unit,
+      item.pricePerUnit,
+      item.product?.unit_price,
+      item.product?.unitPrice
     ),
 
     quantity: firstString(
-      raw.quantity,
-      raw.package_size,
-      raw.packageSize,
-      raw.size,
-      raw.content,
-      raw.product?.quantity,
-      raw.product?.package_size,
-      raw.product?.packageSize
+      item.quantity,
+      item.package_size,
+      item.packageSize,
+      item.size,
+      item.content,
+      item.product?.quantity,
+      item.product?.package_size,
+      item.product?.packageSize
     ),
 
     category: firstString(
-      raw.category?.name,
-      raw.category,
-      raw.category_name,
-      raw.categoryName,
-      raw.product?.category?.name,
-      raw.product?.category
+      item.category?.name,
+      item.category,
+      item.category_name,
+      item.categoryName,
+      item.product?.category?.name,
+      item.product?.category
     ),
 
     promotionType: firstString(
-      raw.promotion_type,
-      raw.promotionType,
-      raw.offer_text,
-      raw.offerText,
-      raw.deal_text,
-      raw.dealText,
-      raw.promotion?.type,
-      raw.promotion?.text
+      item.promotion_type,
+      item.promotionType,
+      item.offer_text,
+      item.offerText,
+      item.deal_text,
+      item.dealText,
+      item.promotion?.type,
+      item.promotion?.text
     ),
 
     promotionStatus: firstString(
-      raw.promotion_status,
-      raw.promotionStatus,
-      raw.status,
-      raw.promotion?.status
+      item.promotion_status,
+      item.promotionStatus,
+      item.status,
+      item.promotion?.status
     ),
 
     validFrom,
     validUntil,
 
     url: firstString(
-      raw.url,
-      raw.product_url,
-      raw.productUrl,
-      raw.deal_url,
-      raw.dealUrl,
-      raw.product?.url
+      item.url,
+      item.product_url,
+      item.productUrl,
+      item.deal_url,
+      item.dealUrl,
+      item.product?.url
     ),
 
     imageUrl: firstString(
-      raw.image_url,
-      raw.imageUrl,
-      raw.image,
-      raw.thumbnail,
-      raw.thumbnail_url,
-      raw.thumbnailUrl,
-      raw.product?.image_url,
-      raw.product?.imageUrl,
-      raw.product?.image
+      item.image_url,
+      item.imageUrl,
+      item.image,
+      item.thumbnail,
+      item.thumbnail_url,
+      item.thumbnailUrl,
+      item.product?.image_url,
+      item.product?.imageUrl,
+      item.product?.image
     ),
   };
 }
@@ -789,10 +747,7 @@ function firstString(...values) {
 }
 
 function numberOrNull(value) {
-  if (
-    value == null ||
-    value === ''
-  ) {
+  if (value == null || value === '') {
     return null;
   }
 
@@ -805,10 +760,7 @@ function numberOrNull(value) {
   const normalized = String(value)
     .trim()
     .replace(/\s/g, '')
-    .replace(
-      /\.(?=\d{3}(?:\D|$))/g,
-      ''
-    )
+    .replace(/\.(?=\d{3}(?:\D|$))/g, '')
     .replace(',', '.')
     .replace(/[^0-9.-]/g, '');
 
@@ -855,15 +807,11 @@ function deduplicate(items) {
 async function preserveExisting(reason) {
   try {
     const existing = JSON.parse(
-      await readFile(
-        outputPath,
-        'utf8'
-      )
+      await readFile(outputPath, 'utf8')
     );
 
     existing.meta ||= {};
-    existing.meta.lastRefreshError =
-      reason;
+    existing.meta.lastRefreshError = reason;
     existing.meta.lastRefreshAttempt =
       new Date().toISOString();
 
