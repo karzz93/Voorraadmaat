@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="nl">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#173f35" />
+    <meta name="description" content="Lokale voorraad, weekmenu's en slimme boodschappenlijsten voor Nederlandse supermarkten." />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Voorraadmaat" />
+    <link rel="manifest" href="./manifest.webmanifest" />
+    <link rel="icon" href="./icons/icon-192.png" />
+    <link rel="apple-touch-icon" href="./icons/icon-192.png" />
+    <link rel="stylesheet" href="./styles.css" />
+    <title>Voorraadmaat</title>
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <button class="brand" type="button" data-nav="home" aria-label="Naar overzicht">
+          <img src="./icons/icon-192.png" alt="" width="42" height="42" />
+          <span>
+            <strong>Voorraadmaat</strong>
+            <small id="connection-status">Alles lokaal bewaard</small>
+          </span>
+        </button>
+        <div class="topbar-actions">
+          <button class="icon-button" type="button" data-action="install" aria-label="App installeren" title="App installeren">↓</button>
+          <button class="icon-button" type="button" data-action="open-settings" aria-label="Instellingen" title="Instellingen">⚙</button>
+        </div>
+      </header>
+
+      <main id="app" class="app-content" tabindex="-1" aria-live="polite"></main>
+
+      <nav class="bottom-nav" aria-label="Hoofdnavigatie">
+        <button type="button" data-nav="home" aria-label="Overzicht"><span>⌂</span><small>Overzicht</small></button>
+        <button type="button" data-nav="inventory" aria-label="Voorraad"><span>▦</span><small>Voorraad</small></button>
+        <button type="button" data-nav="week" aria-label="Weekmenu"><span>♨</span><small>Weekmenu</small></button>
+        <button type="button" data-nav="shopping" aria-label="Winkellijst"><span>✓</span><small>Winkellijst</small></button>
+        <button type="button" data-nav="deals" aria-label="Deals"><span>€</span><small>Deals</small></button>
+      </nav>
+    </div>
+
+    <dialog id="modal" class="modal"></dialog>
+    <div id="toast-region" class="toast-region" aria-live="assertive" aria-atomic="true"></div>
+
+    <noscript>Voorraadmaat heeft JavaScript nodig om je voorraad lokaal op te slaan.</noscript>
+    <script type="module" src="./js/app.js"></script>
+  </body>
+</html>

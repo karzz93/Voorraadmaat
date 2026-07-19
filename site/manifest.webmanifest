@@ -1,0 +1,53 @@
+{
+  "id": "./",
+  "name": "Voorraadmaat",
+  "short_name": "Voorraadmaat",
+  "description": "Beheer je boodschappenvoorraad, maak een weekmenu en verdeel je winkellijst op basis van supermarktdeals.",
+  "lang": "nl-NL",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "display_override": ["window-controls-overlay", "standalone", "minimal-ui"],
+  "orientation": "portrait-primary",
+  "background_color": "#f7f5ee",
+  "theme_color": "#173f35",
+  "categories": ["food", "shopping", "lifestyle"],
+  "icons": [
+    {
+      "src": "./icons/icon-192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "./icons/icon-512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ],
+  "share_target": {
+    "action": "./",
+    "method": "GET",
+    "enctype": "application/x-www-form-urlencoded",
+    "params": {
+      "title": "title",
+      "text": "text",
+      "url": "url"
+    }
+  },
+  "shortcuts": [
+    {
+      "name": "Boodschappen importeren",
+      "short_name": "Importeren",
+      "url": "./?open=import",
+      "icons": [{ "src": "./icons/icon-192.png", "sizes": "192x192" }]
+    },
+    {
+      "name": "Winkellijst openen",
+      "short_name": "Winkellijst",
+      "url": "./?open=shopping",
+      "icons": [{ "src": "./icons/icon-192.png", "sizes": "192x192" }]
+    }
+  ]
+}

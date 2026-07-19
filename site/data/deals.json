@@ -1,0 +1,10 @@
+{
+  "meta": {
+    "status": "seed",
+    "generatedAt": null,
+    "source": "PrijsProfeet public deals API",
+    "retailers": ["albert_heijn", "dirk", "lidl", "hoogvliet", "plus"],
+    "note": "Run the Refresh supermarket deals GitHub Action after publishing."
+  },
+  "deals": []
+}
