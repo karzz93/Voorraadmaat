@@ -972,88 +972,283 @@ async function installApp() {
   modal.showModal();
 }
 
-async function loadDeals({ announce = false, force = false, query = '' } = {}) {
-  const activeShopping = state.shopping.filter((item) => !item.checked);
-  const explicitQuery = String(query || ui.dealSearch || '').trim();
+async function loadDeals({
+  announce = false,
+  force = false,
+  query = '',
+} = {}) {
+  const activeShopping =
+    state.shopping.filter(
+      (item) => !item.checked
+    );
 
-  if (!explicitQuery && !activeShopping.length) {
-    deals = [];
-    dealOptimization = null;
-    dealsMeta = { status: 'idle', generatedAt: null };
+  const explicitQuery =
+    String(
+      query ||
+      ui.dealSearch ||
+      ''
+    ).trim();
+
+  dealsMeta = {
+    ...dealsMeta,
+    status: 'loading',
+    error: null,
+  };
+
+  if (currentView === 'deals') {
     render();
-    return;
   }
-
-  dealsMeta = { ...dealsMeta, status: 'loading' };
-  render();
 
   try {
     let rawDeals = [];
-    let generatedAt = new Date().toISOString();
 
+    let generatedAt =
+      new Date().toISOString();
+
+    let sourceType = 'top';
+
+    /*
+     * 1. The user entered a search term.
+     */
     if (explicitQuery) {
-      const payload = await searchDeals(
-        explicitQuery,
-        state.settings.selectedStores,
-        { force }
-      );
-      rawDeals = payload.items || [];
-      generatedAt = payload.retrievedAt || generatedAt;
-    } else {
-      const payload = await searchShoppingListDeals(
-        activeShopping,
-        state.settings.selectedStores,
-        { force }
-      );
-      rawDeals = payload.results.flatMap((result) => result.items || []);
-      generatedAt = payload.retrievedAt || generatedAt;
+      sourceType = 'search';
+
+      const payload =
+        await searchDeals(
+          explicitQuery,
+          state.settings.selectedStores,
+          { force }
+        );
+
+      rawDeals =
+        payload.items || [];
+
+      generatedAt =
+        payload.retrievedAt ||
+        generatedAt;
     }
 
-    const unique = new Map();
+    /*
+     * 2. No explicit search, but there are
+     * products on the shopping list.
+     */
+    else if (
+      activeShopping.length
+    ) {
+      sourceType =
+        'shopping-list';
+
+      const payload =
+        await searchShoppingListDeals(
+          activeShopping,
+          state.settings.selectedStores,
+          { force }
+        );
+
+      rawDeals =
+        payload.results.flatMap(
+          (result) =>
+            result.items || []
+        );
+
+      generatedAt =
+        payload.retrievedAt ||
+        generatedAt;
+    }
+
+    /*
+     * 3. No search and no shopping list:
+     * show current top deals.
+     */
+    else {
+      sourceType = 'top';
+
+      const payload =
+        await loadTopDeals(
+          state.settings.selectedStores,
+          { force }
+        );
+
+      rawDeals =
+        payload.items || [];
+
+      generatedAt =
+        payload.retrievedAt ||
+        generatedAt;
+    }
+
+    /*
+     * Normalize and deduplicate the Worker results.
+     */
+    const uniqueDeals =
+      new Map();
+
     for (const rawDeal of rawDeals) {
-      const deal = normalizeDeal(rawDeal);
-      if (!deal.retailer || deal.price == null) continue;
-      const key = `${deal.retailer}|${deal.id}|${deal.price}`;
-      if (!unique.has(key)) unique.set(key, deal);
+      const deal =
+        normalizeDeal(rawDeal);
+
+      if (
+        !deal ||
+        !deal.retailer ||
+        deal.price == null
+      ) {
+        continue;
+      }
+
+      /*
+       * Keep only active deals when a validity
+       * date or status is supplied.
+       */
+      if (!isDealActive(deal)) {
+        continue;
+      }
+
+      const key = [
+        deal.retailer,
+        deal.id ||
+          canonicalProductName(
+            deal.name
+          ),
+        deal.price,
+        deal.validUntil || '',
+      ].join('|');
+
+      if (!uniqueDeals.has(key)) {
+        uniqueDeals.set(
+          key,
+          deal
+        );
+      }
     }
-    deals = [...unique.values()];
 
-    const indexEntries = deals.map((deal, index) => ({
-      i: index,
-      r: deal.retailer,
-      n: deal.name,
-      b: deal.brand || '',
-      c: deal.category || '',
-      p: deal.price,
-      o: deal.originalPrice,
-      d: deal.discountPercentage,
-      q: deal.quantity || '',
-      e: deal.ean || '',
-      t: canonicalProductName(`${deal.name} ${deal.brand || ''} ${deal.category || ''}`).split(' ').filter(Boolean),
-    }));
+    deals = [
+      ...uniqueDeals.values(),
+    ];
 
-    dealOptimization = activeShopping.length
-      ? optimizeShoppingList(activeShopping, { entries: indexEntries }, {
-          retailers: state.settings.selectedStores,
-          maxStores: 2,
-          visitCost: 2.5,
+    /*
+     * Build the compact structure expected by
+     * the deal optimizer.
+     */
+    const indexEntries =
+      deals.map(
+        (deal, index) => ({
+          i: index,
+          r: deal.retailer,
+          n: deal.name,
+          b: deal.brand || '',
+          c: deal.category || '',
+          p: deal.price,
+          o: deal.originalPrice,
+          d: deal.discountPercentage,
+          q: deal.quantity || '',
+          e: deal.ean || '',
+
+          t: canonicalProductName(
+            [
+              deal.name,
+              deal.brand,
+              deal.category,
+            ]
+              .filter(Boolean)
+              .join(' ')
+          )
+            .split(' ')
+            .filter(Boolean),
         })
-      : null;
+      );
+
+    /*
+     * Calculate the best one-store or two-store
+     * option only when a shopping list exists.
+     */
+    dealOptimization =
+      activeShopping.length
+        ? optimizeShoppingList(
+            activeShopping,
+            {
+              entries:
+                indexEntries,
+            },
+            {
+              retailers:
+                state.settings.selectedStores,
+
+              maxStores: 2,
+
+              /*
+               * Visiting a second supermarket is
+               * treated as costing about €2.50 in
+               * time/travel inconvenience.
+               */
+              visitCost: 2.5,
+            }
+          )
+        : null;
 
     dealsMeta = {
       status: 'live',
+
       generatedAt,
-      query: explicitQuery || null,
-      count: deals.length,
+
+      query:
+        explicitQuery || null,
+
+      sourceType,
+
+      count:
+        deals.length,
+
+      error: null,
     };
 
-    if (announce) showToast(`${deals.length} passende deals geladen.`);
+    if (announce) {
+      if (explicitQuery) {
+        showToast(
+          deals.length
+            ? `${deals.length} passende deals voor “${explicitQuery}” geladen.`
+            : `Geen actieve deals gevonden voor “${explicitQuery}”.`
+        );
+      } else if (
+        sourceType ===
+        'shopping-list'
+      ) {
+        showToast(
+          `${deals.length} deals voor je winkellijst geladen.`
+        );
+      } else {
+        showToast(
+          `${deals.length} actuele topdeals geladen.`
+        );
+      }
+    }
   } catch (error) {
-    console.error('Live deal search failed', error);
+    console.error(
+      'Live deal loading failed',
+      error
+    );
+
     deals = [];
     dealOptimization = null;
-    dealsMeta = { status: 'error', error: String(error) };
-    if (announce) showToast('Live deals konden niet worden ververst.');
+
+    dealsMeta = {
+      status: 'error',
+
+      generatedAt: null,
+
+      query:
+        explicitQuery || null,
+
+      error:
+        error instanceof Error
+          ? error.message
+          : String(error),
+    };
+
+    if (announce) {
+      showToast(
+        'Live deals konden niet worden geladen.'
+      );
+    }
   }
 
   render();
