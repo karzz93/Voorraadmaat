@@ -29,6 +29,7 @@ import {
   loadTopDeals,
 } from './deals-api.js';
 import { optimizeShoppingList } from './deals-engine.js';
+import { extractSamsungNoteText } from './samsung-notes.js';
 
 const app = document.querySelector('#app');
 const modal = document.querySelector('#modal');
@@ -769,7 +770,7 @@ function openImportDialog(initialText = '') {
       <div class="modal-body form-grid">
         <div class="notice">De app herkent onder meer “2x melk”, “1,5 kg aardappelen”, “bananen 6” en regels met vinkvakjes.</div>
         <label class="field-label">Plak of bewerk je lijst<textarea id="import-text" class="field" name="text" placeholder="2x melk\n1 kg aardappelen\n6 bananen">${escapeHtml(initialText)}</textarea></label>
-        <label class="field-label">Of kies een tekstbestand<input id="import-file" class="field" type="file" accept=".txt,.md,text/plain,text/markdown" /></label>
+        <label class="field-label">Of kies een tekst-, Markdown- of Samsung Notes-bestand<input id="import-file" class="field" type="file" accept=".txt,.md,.sdocx,text/plain,text/markdown,application/zip,application/octet-stream" /></label>
         <div><strong id="import-count">0 producten herkend</strong><div id="import-preview" class="preview-list"></div></div>
       </div>
       <footer class="modal-footer"><button class="button secondary" type="button" data-action="close-modal">Annuleren</button><button class="button" type="submit">Voeg toe aan voorraad</button></footer>
@@ -811,19 +812,46 @@ function submitGroceryImport(form) {
 
 async function readGroceryFile(file) {
   if (!file) return;
-  if (!/\.(txt|md)$/i.test(file.name) && !['text/plain', 'text/markdown'].includes(file.type)) {
-    showToast('Gebruik voor deze versie een tekst- of Markdown-bestand. Deel een Samsung Note bij voorkeur als tekst.');
+
+  const isSamsungNote = /\.sdocx$/i.test(file.name);
+  const isTextFile =
+    /\.(txt|md)$/i.test(file.name) ||
+    ['text/plain', 'text/markdown'].includes(file.type);
+
+  if (!isSamsungNote && !isTextFile) {
+    showToast('Kies een .txt-, .md- of Samsung Notes .sdocx-bestand.');
     return;
   }
+
   try {
-    const text = await file.text();
+    if (isSamsungNote) {
+      showToast('Samsung Note wordt uitgelezen…');
+    }
+
+    const text = isSamsungNote
+      ? await extractSamsungNoteText(file)
+      : await file.text();
+
     const textarea = document.querySelector('#import-text');
     if (textarea) {
       textarea.value = text;
       renderImportPreview(text);
+      textarea.focus();
     }
-  } catch {
-    showToast('Het bestand kon niet worden gelezen.');
+
+    const recognizedCount = parseGroceryText(text).length;
+    showToast(
+      recognizedCount
+        ? `${recognizedCount} producten uit ${file.name} herkend.`
+        : 'Het bestand is gelezen, maar er zijn nog geen producten herkend.'
+    );
+  } catch (error) {
+    console.error('Importbestand kon niet worden gelezen', error);
+    showToast(
+      error instanceof Error
+        ? error.message
+        : 'Het bestand kon niet worden gelezen.'
+    );
   }
 }
 
