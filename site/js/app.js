@@ -22,21 +22,15 @@ import {
   sanitizeState,
   scaledIngredients,
 } from './core.js';
-
+import { RECIPE_LIBRARY } from './recipes.js';
 import {
-  RECIPE_LIBRARY,
-} from './recipes.js';
-
-import {
+  DEAL_CATEGORIES,
   clearDealsCache,
-  loadTopDeals,
+  loadDealFeed,
   searchDeals,
   searchShoppingListDeals,
 } from './deals-api.js';
-
-import {
-  optimizeShoppingList,
-} from './deals-engine.js';
+import { optimizeShoppingList } from './deals-engine.js';
 
 const app = document.querySelector('#app');
 const modal = document.querySelector('#modal');
@@ -50,6 +44,9 @@ let deals = [];
 let dealsMeta = { status: 'idle' };
 let dealOptimization = null;
 let dealSearchTimer = null;
+let dealFeedCursor = '';
+let dealFeedHasMore = false;
+let dealFeedLoadingMore = false;
 let installPrompt = null;
 let undoSnapshot = null;
 let toastTimer = null;
@@ -58,6 +55,7 @@ const ui = {
   inventorySearch: '',
   dealSearch: '',
   dealStore: 'all',
+  dealCategory: 'all',
 };
 
 init();
@@ -153,11 +151,22 @@ function handleClick(event) {
       break;
     case 'refresh-deals':
       clearDealsCache();
+      resetDealFeed();
       loadDeals({ announce: true, force: true });
       break;
     case 'set-deal-store':
       ui.dealStore = target.dataset.store || 'all';
-      render();
+      resetDealFeed();
+      loadDeals({ force: true });
+      break;
+    case 'set-deal-category':
+      ui.dealCategory = target.dataset.category || 'all';
+      ui.dealSearch = '';
+      resetDealFeed();
+      loadDeals({ force: true });
+      break;
+    case 'load-more-deals':
+      loadMoreDeals();
       break;
     case 'export-backup':
       exportBackup();
@@ -217,8 +226,18 @@ function handleInput(event) {
     ui.dealSearch = target.value;
     filterDealCards(target.value);
     clearTimeout(dealSearchTimer);
-    if (target.value.trim().length >= 2) {
-      dealSearchTimer = setTimeout(() => loadDeals({ query: target.value.trim() }), 450);
+
+    const query = target.value.trim();
+    if (query.length >= 2) {
+      dealSearchTimer = setTimeout(() => {
+        resetDealFeed();
+        loadDeals({ query });
+      }, 450);
+    } else if (!query) {
+      dealSearchTimer = setTimeout(() => {
+        resetDealFeed();
+        loadDeals();
+      }, 250);
     }
   }
 }
@@ -514,16 +533,33 @@ function shoppingStoreSection(store, items) {
 
 function renderDeals() {
   const active = deals.filter((deal) => isDealActive(deal));
-  const storeFiltered = ui.dealStore === 'all' ? active : active.filter((deal) => deal.retailer === ui.dealStore);
+  const storeFiltered = ui.dealStore === 'all'
+    ? active
+    : active.filter((deal) => deal.retailer === ui.dealStore);
+  const categoryFiltered = ui.dealCategory === 'all'
+    ? storeFiltered
+    : storeFiltered.filter(
+        (deal) => dealCategorySlug(deal.category, deal.name) === ui.dealCategory
+      );
   const search = canonicalProductName(ui.dealSearch);
-  const filtered = storeFiltered
+  const filtered = categoryFiltered
     .filter((deal) => !search || canonicalProductName(deal.name).includes(search))
-    .sort((a, b) => (b.discountPercentage || 0) - (a.discountPercentage || 0) || Number(a.price || Infinity) - Number(b.price || Infinity));
+    .sort(
+      (a, b) =>
+        (b.discountPercentage || 0) - (a.discountPercentage || 0) ||
+        Number(a.price || Infinity) - Number(b.price || Infinity)
+    );
+
+  const sourceDescription = ui.dealSearch
+    ? `Zoekresultaten voor “${escapeHtml(ui.dealSearch)}”`
+    : ui.dealCategory === 'all'
+      ? 'Alle actieve aanbiedingen, per categorie geladen'
+      : `Actieve aanbiedingen in ${escapeHtml(dealCategoryLabel(ui.dealCategory))}`;
 
   return `
     <div class="page">
       <header class="page-heading">
-        <div><span class="eyebrow">${dealsMeta.generatedAt ? `Bijgewerkt ${escapeHtml(formatDealTimestamp(dealsMeta.generatedAt))}` : 'Aanbiedingenfeed'}</span><h1>Deals</h1><p>Actieve aanbiedingen voor je gekozen winkels. Prijzen blijven indicatief; controleer ze bij de supermarkt.</p></div>
+        <div><span class="eyebrow">${dealsMeta.generatedAt ? `Bijgewerkt ${escapeHtml(formatDealTimestamp(dealsMeta.generatedAt))}` : 'Aanbiedingenfeed'}</span><h1>Deals</h1><p>${sourceDescription}. Prijzen blijven indicatief; controleer ze bij de supermarkt.</p></div>
         <button class="button secondary small" type="button" data-action="refresh-deals">↻ Ververs</button>
       </header>
 
@@ -532,39 +568,73 @@ function renderDeals() {
         ${state.settings.selectedStores.map((store) => `<button type="button" data-action="set-deal-store" data-store="${escapeAttr(store)}" aria-pressed="${ui.dealStore === store}">${escapeHtml(STORE_LABELS[store])}</button>`).join('')}
       </div>
 
+      <div class="category-strip" aria-label="Filter op categorie">
+        ${DEAL_CATEGORIES.map((category) => `<button type="button" data-action="set-deal-category" data-category="${escapeAttr(category.slug)}" aria-pressed="${ui.dealCategory === category.slug}">${escapeHtml(category.label)}</button>`).join('')}
+      </div>
+
       <div class="search-bar"><input id="deal-search" type="search" value="${escapeAttr(ui.dealSearch)}" placeholder="Zoek product of merk" autocomplete="off" aria-label="Zoek aanbiedingen" /></div>
 
       ${renderDealsStatus()}
 
       ${filtered.length
-        ? `<div class="deal-grid" id="deal-grid">${filtered.slice(0, 160).map(dealCard).join('')}</div>`
-        : emptyState('🏷️', 'Geen passende actieve deals', 'Ververs de feed, kies een andere winkel of probeer een andere zoekterm.')}
+        ? `<div class="deal-grid" id="deal-grid">${filtered.map(dealCard).join('')}</div>`
+        : emptyState(
+            '🏷️',
+            ui.dealSearch
+              ? `Geen deals gevonden voor “${escapeHtml(ui.dealSearch)}”`
+              : 'Geen aanbiedingen in deze selectie',
+            ui.dealSearch
+              ? 'Probeer een bredere zoekterm of kies een andere supermarkt.'
+              : 'Kies een andere categorie of laad de feed opnieuw.'
+          )}
+
+      ${!ui.dealSearch && dealFeedHasMore
+        ? `<div class="load-more-row"><button class="button secondary" type="button" data-action="load-more-deals" ${dealFeedLoadingMore ? 'disabled' : ''}>${dealFeedLoadingMore ? 'Aanbiedingen laden…' : 'Meer aanbiedingen laden'}</button></div>`
+        : ''}
     </div>`;
 }
 
 function dealCard(deal) {
-  const validity = deal.validUntil ? `t/m ${formatDate(deal.validUntil)}` : 'actuele actie';
+  const category = normalizeDealCategory(deal.category, deal.name);
+  const validity = deal.validUntil ? `t/m ${formatDate(deal.validUntil)}` : '';
+  const promotion = meaningfulPromotion(deal.promotionType);
+  const detail = deal.quantity || deal.unitPrice || deal.brand || '';
+
   return `
     <article class="deal-card" data-deal-key="${escapeAttr(canonicalProductName(deal.name))}">
       <div>
         <span class="eyebrow">${escapeHtml(STORE_LABELS[deal.retailer] || deal.retailer)}</span>
+        <span class="deal-category">${escapeHtml(category)}</span>
         <h3>${escapeHtml(deal.name)}</h3>
-        <p>${escapeHtml(deal.quantity || deal.unitPrice || validity)}</p>
+        ${detail ? `<p>${escapeHtml(detail)}</p>` : ''}
       </div>
       <div>
         <div class="price-line"><strong>${formatCurrency(deal.price)}</strong>${deal.originalPrice ? `<del>${formatCurrency(deal.originalPrice)}</del>` : ''}</div>
-        <div class="meta-row"><span class="chip">${escapeHtml(validity)}</span>${deal.discountPercentage ? `<span class="chip success">-${Math.round(deal.discountPercentage)}%</span>` : ''}</div>
+        <div class="meta-row">
+          ${validity ? `<span class="chip">${escapeHtml(validity)}</span>` : ''}
+          ${promotion ? `<span class="chip">${escapeHtml(promotion)}</span>` : ''}
+          ${deal.discountPercentage ? `<span class="chip success">-${Math.round(deal.discountPercentage)}%</span>` : ''}
+        </div>
         <button class="button secondary small" type="button" data-action="add-deal-to-shopping" data-id="${escapeAttr(deal.id)}">Op lijst</button>
       </div>
     </article>`;
 }
 
 function renderDealsStatus() {
-  if (dealsMeta.status === 'idle') return '<div class="notice">Vul een zoekterm in of zet producten op je winkellijst om live aanbiedingen te zoeken.</div>';
-  if (dealsMeta.status === 'loading') return '<div class="notice">Live aanbiedingen worden gezocht…</div>';
-  if (dealsMeta.status === 'error') return '<div class="notice error">De live aanbiedingenservice is nu niet bereikbaar. Je voorraad, recepten en winkellijst blijven offline werken.</div>';
+  if (dealsMeta.status === 'loading') {
+    return '<div class="notice">Actieve aanbiedingen worden per categorie geladen…</div>';
+  }
+  if (dealsMeta.status === 'error') {
+    return `<div class="notice error">${escapeHtml(dealsMeta.error || 'De live aanbiedingenservice is nu niet bereikbaar.')} Je voorraad, recepten en winkellijst blijven offline werken.</div>`;
+  }
+
   const activeCount = deals.filter((deal) => isDealActive(deal)).length;
-  return `<div class="notice success">${activeCount} passende deals live geladen via <a href="https://www.prijsprofeet.nl" target="_blank" rel="noreferrer">PrijsProfeet</a>.</div>`;
+  const moreText = !ui.dealSearch && dealFeedHasMore ? ' Meer aanbiedingen zijn beschikbaar.' : '';
+  const modeText = dealsMeta.mode === 'search-fallback'
+    ? ' De bron leverde voor deze categorie een beperkte zoekselectie.'
+    : '';
+
+  return `<div class="notice success">${activeCount} actieve aanbiedingen geladen via <a href="https://www.prijsprofeet.nl" target="_blank" rel="noreferrer">PrijsProfeet</a>.${moreText}${modeText}</div>`;
 }
 
 function renderShoppingDealSummary() {
@@ -972,232 +1042,65 @@ async function installApp() {
   modal.showModal();
 }
 
-async function loadDeals({
-  announce = false,
-  force = false,
-  query = '',
-} = {}) {
-  const activeShopping =
-    state.shopping.filter(
-      (item) => !item.checked
-    );
+async function loadDeals({ announce = false, force = false, query = '' } = {}) {
+  const activeShopping = state.shopping.filter((item) => !item.checked);
+  const explicitQuery = String(query || ui.dealSearch || '').trim();
+  const retailers = effectiveDealRetailers();
 
-  const explicitQuery =
-    String(
-      query ||
-      ui.dealSearch ||
-      ''
-    ).trim();
-
-  dealsMeta = {
-    ...dealsMeta,
-    status: 'loading',
-    error: null,
-  };
-
-  if (currentView === 'deals') {
-    render();
-  }
+  dealsMeta = { ...dealsMeta, status: 'loading', error: null };
+  if (currentView === 'deals') render();
 
   try {
     let rawDeals = [];
+    let generatedAt = new Date().toISOString();
+    let sourceType = 'feed';
+    let mode = 'category';
 
-    let generatedAt =
-      new Date().toISOString();
-
-    let sourceType = 'top';
-
-    /*
-     * 1. The user entered a search term.
-     */
     if (explicitQuery) {
       sourceType = 'search';
+      const payload = await searchDeals(explicitQuery, retailers, { force });
+      rawDeals = payload.items || [];
+      generatedAt = payload.retrievedAt || generatedAt;
+      dealFeedCursor = '';
+      dealFeedHasMore = false;
+    } else {
+      const feed = await loadDealFeed({
+        retailers,
+        category: ui.dealCategory,
+        cursor: '',
+        force,
+      });
 
-      const payload =
-        await searchDeals(
-          explicitQuery,
-          state.settings.selectedStores,
-          { force }
-        );
+      rawDeals = feed.items || [];
+      generatedAt = feed.retrievedAt || generatedAt;
+      dealFeedCursor = feed.nextCursor || '';
+      dealFeedHasMore = Boolean(feed.hasMore);
+      mode = feed.mode || mode;
 
-      rawDeals =
-        payload.items || [];
-
-      generatedAt =
-        payload.retrievedAt ||
-        generatedAt;
-    }
-
-    /*
-     * 2. No explicit search, but there are
-     * products on the shopping list.
-     */
-    else if (
-      activeShopping.length
-    ) {
-      sourceType =
-        'shopping-list';
-
-      const payload =
-        await searchShoppingListDeals(
+      /*
+       * Keep the smart shopping-list comparison useful without replacing
+       * the visible all-deals feed.
+       */
+      if (activeShopping.length) {
+        const shoppingPayload = await searchShoppingListDeals(
           activeShopping,
           state.settings.selectedStores,
           { force }
         );
-
-      rawDeals =
-        payload.results.flatMap(
-          (result) =>
-            result.items || []
-        );
-
-      generatedAt =
-        payload.retrievedAt ||
-        generatedAt;
-    }
-
-    /*
-     * 3. No search and no shopping list:
-     * show current top deals.
-     */
-    else {
-      sourceType = 'top';
-
-      const payload =
-        await loadTopDeals(
-          state.settings.selectedStores,
-          { force }
-        );
-
-      rawDeals =
-        payload.items || [];
-
-      generatedAt =
-        payload.retrievedAt ||
-        generatedAt;
-    }
-
-    /*
-     * Normalize and deduplicate the Worker results.
-     */
-    const uniqueDeals =
-      new Map();
-
-    for (const rawDeal of rawDeals) {
-      const deal =
-        normalizeDeal(rawDeal);
-
-      if (
-        !deal ||
-        !deal.retailer ||
-        deal.price == null
-      ) {
-        continue;
-      }
-
-      /*
-       * Keep only active deals when a validity
-       * date or status is supplied.
-       */
-      if (!isDealActive(deal)) {
-        continue;
-      }
-
-      const key = [
-        deal.retailer,
-        deal.id ||
-          canonicalProductName(
-            deal.name
-          ),
-        deal.price,
-        deal.validUntil || '',
-      ].join('|');
-
-      if (!uniqueDeals.has(key)) {
-        uniqueDeals.set(
-          key,
-          deal
-        );
+        rawDeals.push(...shoppingPayload.results.flatMap((result) => result.items || []));
       }
     }
 
-    deals = [
-      ...uniqueDeals.values(),
-    ];
-
-    /*
-     * Build the compact structure expected by
-     * the deal optimizer.
-     */
-    const indexEntries =
-      deals.map(
-        (deal, index) => ({
-          i: index,
-          r: deal.retailer,
-          n: deal.name,
-          b: deal.brand || '',
-          c: deal.category || '',
-          p: deal.price,
-          o: deal.originalPrice,
-          d: deal.discountPercentage,
-          q: deal.quantity || '',
-          e: deal.ean || '',
-
-          t: canonicalProductName(
-            [
-              deal.name,
-              deal.brand,
-              deal.category,
-            ]
-              .filter(Boolean)
-              .join(' ')
-          )
-            .split(' ')
-            .filter(Boolean),
-        })
-      );
-
-    /*
-     * Calculate the best one-store or two-store
-     * option only when a shopping list exists.
-     */
-    dealOptimization =
-      activeShopping.length
-        ? optimizeShoppingList(
-            activeShopping,
-            {
-              entries:
-                indexEntries,
-            },
-            {
-              retailers:
-                state.settings.selectedStores,
-
-              maxStores: 2,
-
-              /*
-               * Visiting a second supermarket is
-               * treated as costing about €2.50 in
-               * time/travel inconvenience.
-               */
-              visitCost: 2.5,
-            }
-          )
-        : null;
+    deals = normalizeAndMergeDeals(rawDeals, []);
+    dealOptimization = buildDealOptimization(activeShopping);
 
     dealsMeta = {
       status: 'live',
-
       generatedAt,
-
-      query:
-        explicitQuery || null,
-
+      query: explicitQuery || null,
       sourceType,
-
-      count:
-        deals.length,
-
+      mode,
+      count: deals.length,
       error: null,
     };
 
@@ -1208,50 +1111,176 @@ async function loadDeals({
             ? `${deals.length} passende deals voor “${explicitQuery}” geladen.`
             : `Geen actieve deals gevonden voor “${explicitQuery}”.`
         );
-      } else if (
-        sourceType ===
-        'shopping-list'
-      ) {
-        showToast(
-          `${deals.length} deals voor je winkellijst geladen.`
-        );
       } else {
-        showToast(
-          `${deals.length} actuele topdeals geladen.`
-        );
+        showToast(`${deals.length} aanbiedingen geladen.`);
       }
     }
   } catch (error) {
-    console.error(
-      'Live deal loading failed',
-      error
-    );
-
+    console.error('Live deal loading failed', error);
     deals = [];
     dealOptimization = null;
-
+    dealFeedCursor = '';
+    dealFeedHasMore = false;
     dealsMeta = {
       status: 'error',
-
       generatedAt: null,
-
-      query:
-        explicitQuery || null,
-
-      error:
-        error instanceof Error
-          ? error.message
-          : String(error),
+      query: explicitQuery || null,
+      error: error instanceof Error ? error.message : String(error),
     };
-
-    if (announce) {
-      showToast(
-        'Live deals konden niet worden geladen.'
-      );
-    }
+    if (announce) showToast('Live deals konden niet worden geladen.');
   }
 
   render();
+}
+
+async function loadMoreDeals() {
+  if (dealFeedLoadingMore || !dealFeedHasMore || !dealFeedCursor || ui.dealSearch) {
+    return;
+  }
+
+  dealFeedLoadingMore = true;
+  render();
+
+  try {
+    const feed = await loadDealFeed({
+      retailers: effectiveDealRetailers(),
+      category: ui.dealCategory,
+      cursor: dealFeedCursor,
+    });
+
+    deals = normalizeAndMergeDeals(feed.items || [], deals);
+    dealFeedCursor = feed.nextCursor || '';
+    dealFeedHasMore = Boolean(feed.hasMore);
+    dealsMeta = {
+      ...dealsMeta,
+      status: 'live',
+      generatedAt: feed.retrievedAt || dealsMeta.generatedAt,
+      mode: feed.mode || dealsMeta.mode,
+      count: deals.length,
+      error: null,
+    };
+  } catch (error) {
+    console.error('More deals could not be loaded', error);
+    dealsMeta = {
+      ...dealsMeta,
+      status: 'error',
+      error: error instanceof Error ? error.message : String(error),
+    };
+  } finally {
+    dealFeedLoadingMore = false;
+    render();
+  }
+}
+
+function resetDealFeed() {
+  deals = [];
+  dealOptimization = null;
+  dealFeedCursor = '';
+  dealFeedHasMore = false;
+  dealFeedLoadingMore = false;
+}
+
+function effectiveDealRetailers() {
+  return ui.dealStore === 'all'
+    ? state.settings.selectedStores
+    : [ui.dealStore];
+}
+
+function normalizeAndMergeDeals(rawDeals, existingDeals = []) {
+  const unique = new Map();
+
+  for (const rawDeal of [...existingDeals, ...rawDeals]) {
+    const deal = normalizeDeal(rawDeal);
+    if (!deal.retailer || deal.price == null || !isDealActive(deal)) continue;
+
+    deal.category = normalizeDealCategory(deal.category, deal.name);
+    const key = [
+      deal.retailer,
+      deal.id || canonicalProductName(deal.name),
+      deal.price,
+      deal.validUntil || '',
+    ].join('|');
+
+    if (!unique.has(key)) unique.set(key, deal);
+  }
+
+  return [...unique.values()];
+}
+
+function buildDealOptimization(activeShopping) {
+  if (!activeShopping.length) return null;
+
+  const indexEntries = deals.map((deal, index) => ({
+    i: index,
+    r: deal.retailer,
+    n: deal.name,
+    b: deal.brand || '',
+    c: deal.category || '',
+    p: deal.price,
+    o: deal.originalPrice,
+    d: deal.discountPercentage,
+    q: deal.quantity || '',
+    e: deal.ean || '',
+    t: canonicalProductName(
+      `${deal.name} ${deal.brand || ''} ${deal.category || ''}`
+    ).split(' ').filter(Boolean),
+  }));
+
+  return optimizeShoppingList(activeShopping, { entries: indexEntries }, {
+    retailers: state.settings.selectedStores,
+    maxStores: 2,
+    visitCost: 2.5,
+  });
+}
+
+function normalizeDealCategory(value, productName = '') {
+  const normalized = canonicalProductName(value || '');
+  const exact = DEAL_CATEGORIES.find(
+    (category) => canonicalProductName(category.label) === normalized
+  );
+  if (exact) return exact.label;
+
+  const inferred = categorizeProduct(`${value || ''} ${productName || ''}`);
+  const aliases = {
+    'Groente & fruit': 'Groente & Fruit',
+    'Zuivel & eieren': 'Zuivel & Eieren',
+    'Vlees, vis & vega': 'Vlees & Gevogelte',
+    'Brood & ontbijt': 'Brood & Bakkerij',
+    'Pasta, rijst & wereldkeuken': 'Pasta, Rijst & Wereldkeuken',
+    'Blik, pot & sauzen': 'Soepen, Conserven & Sauzen',
+    Dranken: 'Frisdrank & Sappen',
+    Huishouden: 'Huishouden & Dier',
+    Overig: 'Overig',
+  };
+
+  return aliases[inferred] || value || inferred || 'Overig';
+}
+
+function dealCategorySlug(value, productName = '') {
+  const label = normalizeDealCategory(value, productName);
+  return DEAL_CATEGORIES.find(
+    (category) => canonicalProductName(category.label) === canonicalProductName(label)
+  )?.slug || 'overig';
+}
+
+function dealCategoryLabel(slug) {
+  return DEAL_CATEGORIES.find((category) => category.slug === slug)?.label || 'Alle categorieën';
+}
+
+function meaningfulPromotion(value) {
+  const promotion = String(value || '').trim();
+  if (!promotion) return '';
+
+  const generic = new Set([
+    'active',
+    'actief',
+    'actie',
+    'actuele actie',
+    'promotion',
+    'percentage',
+  ]);
+
+  return generic.has(promotion.toLowerCase()) ? '' : promotion;
 }
 
 function openBackupDownload(blob, filename) {
