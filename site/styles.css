@@ -1149,3 +1149,59 @@ hr {
     transition-duration: 0.01ms !important;
   }
 }
+
+/* Live all-deals feed */
+.category-strip {
+  display: flex;
+  overflow-x: auto;
+  gap: 7px;
+  padding: 2px 0 7px;
+  scrollbar-width: none;
+}
+
+.category-strip::-webkit-scrollbar {
+  display: none;
+}
+
+.category-strip button {
+  flex: 0 0 auto;
+  min-height: 34px;
+  padding: 6px 11px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.72);
+  color: var(--ink-soft);
+  font: inherit;
+  font-size: 0.76rem;
+  font-weight: 750;
+  cursor: pointer;
+}
+
+.category-strip button[aria-pressed="true"] {
+  border-color: var(--green-700);
+  background: var(--green-100);
+  color: var(--green-900);
+}
+
+.deal-category {
+  display: inline-flex;
+  width: fit-content;
+  margin: 5px 0 7px;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: var(--green-100);
+  color: var(--green-800);
+  font-size: 0.68rem;
+  font-weight: 800;
+  line-height: 1.15;
+}
+
+.load-more-row {
+  display: flex;
+  justify-content: center;
+  padding: 18px 0 4px;
+}
+
+.load-more-row .button {
+  min-width: min(100%, 260px);
+}
