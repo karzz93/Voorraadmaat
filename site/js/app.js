@@ -26,9 +26,7 @@ import { RECIPE_LIBRARY } from './recipes.js';
 import {
   DEAL_CATEGORIES,
   clearDealsCache,
-  loadDealFeed,
-  searchDeals,
-  searchShoppingListDeals,
+  loadTopDeals,
 } from './deals-api.js';
 import { optimizeShoppingList } from './deals-engine.js';
 
@@ -43,10 +41,6 @@ let currentView = sessionStorage.getItem('voorraadmaat-view') || 'home';
 let deals = [];
 let dealsMeta = { status: 'idle' };
 let dealOptimization = null;
-let dealSearchTimer = null;
-let dealFeedCursor = '';
-let dealFeedHasMore = false;
-let dealFeedLoadingMore = false;
 let installPrompt = null;
 let undoSnapshot = null;
 let toastTimer = null;
@@ -156,17 +150,11 @@ function handleClick(event) {
       break;
     case 'set-deal-store':
       ui.dealStore = target.dataset.store || 'all';
-      resetDealFeed();
-      loadDeals({ force: true });
+      render();
       break;
     case 'set-deal-category':
       ui.dealCategory = target.dataset.category || 'all';
-      ui.dealSearch = '';
-      resetDealFeed();
-      loadDeals({ force: true });
-      break;
-    case 'load-more-deals':
-      loadMoreDeals();
+      render();
       break;
     case 'export-backup':
       exportBackup();
@@ -225,20 +213,6 @@ function handleInput(event) {
   if (target.id === 'deal-search') {
     ui.dealSearch = target.value;
     filterDealCards(target.value);
-    clearTimeout(dealSearchTimer);
-
-    const query = target.value.trim();
-    if (query.length >= 2) {
-      dealSearchTimer = setTimeout(() => {
-        resetDealFeed();
-        loadDeals({ query });
-      }, 450);
-    } else if (!query) {
-      dealSearchTimer = setTimeout(() => {
-        resetDealFeed();
-        loadDeals();
-      }, 250);
-    }
   }
 }
 
@@ -551,10 +525,10 @@ function renderDeals() {
     );
 
   const sourceDescription = ui.dealSearch
-    ? `Zoekresultaten voor “${escapeHtml(ui.dealSearch)}”`
+    ? `Zoeken binnen de actuele topdeals naar “${escapeHtml(ui.dealSearch)}”`
     : ui.dealCategory === 'all'
-      ? 'Alle actieve aanbiedingen, per categorie geladen'
-      : `Actieve aanbiedingen in ${escapeHtml(dealCategoryLabel(ui.dealCategory))}`;
+      ? 'Actuele topdeals van je geselecteerde supermarkten'
+      : `Topdeals in ${escapeHtml(dealCategoryLabel(ui.dealCategory))}`;
 
   return `
     <div class="page">
@@ -588,9 +562,6 @@ function renderDeals() {
               : 'Kies een andere categorie of laad de feed opnieuw.'
           )}
 
-      ${!ui.dealSearch && dealFeedHasMore
-        ? `<div class="load-more-row"><button class="button secondary" type="button" data-action="load-more-deals" ${dealFeedLoadingMore ? 'disabled' : ''}>${dealFeedLoadingMore ? 'Aanbiedingen laden…' : 'Meer aanbiedingen laden'}</button></div>`
-        : ''}
     </div>`;
 }
 
@@ -622,19 +593,14 @@ function dealCard(deal) {
 
 function renderDealsStatus() {
   if (dealsMeta.status === 'loading') {
-    return '<div class="notice">Actieve aanbiedingen worden per categorie geladen…</div>';
+    return '<div class="notice">Actuele topdeals worden geladen…</div>';
   }
   if (dealsMeta.status === 'error') {
-    return `<div class="notice error">${escapeHtml(dealsMeta.error || 'De live aanbiedingenservice is nu niet bereikbaar.')} Je voorraad, recepten en winkellijst blijven offline werken.</div>`;
+    return `<div class="notice error">${escapeHtml(dealsMeta.error || 'De topaanbiedingen zijn nu niet bereikbaar.')} Je voorraad, recepten en winkellijst blijven offline werken.</div>`;
   }
 
   const activeCount = deals.filter((deal) => isDealActive(deal)).length;
-  const moreText = !ui.dealSearch && dealFeedHasMore ? ' Meer aanbiedingen zijn beschikbaar.' : '';
-  const modeText = dealsMeta.mode === 'search-fallback'
-    ? ' De bron leverde voor deze categorie een beperkte zoekselectie.'
-    : '';
-
-  return `<div class="notice success">${activeCount} actieve aanbiedingen geladen via <a href="https://www.prijsprofeet.nl" target="_blank" rel="noreferrer">PrijsProfeet</a>.${moreText}${modeText}</div>`;
+  return `<div class="notice success">${activeCount} actuele topdeals geladen via <a href="https://www.prijsprofeet.nl" target="_blank" rel="noreferrer">PrijsProfeet</a>.</div>`;
 }
 
 function renderShoppingDealSummary() {
@@ -1042,142 +1008,54 @@ async function installApp() {
   modal.showModal();
 }
 
-async function loadDeals({ announce = false, force = false, query = '' } = {}) {
+async function loadDeals({ announce = false, force = false } = {}) {
   const activeShopping = state.shopping.filter((item) => !item.checked);
-  const explicitQuery = String(query || ui.dealSearch || '').trim();
-  const retailers = effectiveDealRetailers();
 
   dealsMeta = { ...dealsMeta, status: 'loading', error: null };
   if (currentView === 'deals') render();
 
   try {
-    let rawDeals = [];
-    let generatedAt = new Date().toISOString();
-    let sourceType = 'feed';
-    let mode = 'category';
+    const payload = await loadTopDeals(
+      state.settings.selectedStores,
+      { force }
+    );
 
-    if (explicitQuery) {
-      sourceType = 'search';
-      const payload = await searchDeals(explicitQuery, retailers, { force });
-      rawDeals = payload.items || [];
-      generatedAt = payload.retrievedAt || generatedAt;
-      dealFeedCursor = '';
-      dealFeedHasMore = false;
-    } else {
-      const feed = await loadDealFeed({
-        retailers,
-        category: ui.dealCategory,
-        cursor: '',
-        force,
-      });
-
-      rawDeals = feed.items || [];
-      generatedAt = feed.retrievedAt || generatedAt;
-      dealFeedCursor = feed.nextCursor || '';
-      dealFeedHasMore = Boolean(feed.hasMore);
-      mode = feed.mode || mode;
-
-      /*
-       * Keep the smart shopping-list comparison useful without replacing
-       * the visible all-deals feed.
-       */
-      if (activeShopping.length) {
-        const shoppingPayload = await searchShoppingListDeals(
-          activeShopping,
-          state.settings.selectedStores,
-          { force }
-        );
-        rawDeals.push(...shoppingPayload.results.flatMap((result) => result.items || []));
-      }
-    }
-
-    deals = normalizeAndMergeDeals(rawDeals, []);
+    deals = normalizeAndMergeDeals(payload.items || [], []);
     dealOptimization = buildDealOptimization(activeShopping);
 
     dealsMeta = {
       status: 'live',
-      generatedAt,
-      query: explicitQuery || null,
-      sourceType,
-      mode,
+      generatedAt: payload.retrievedAt || new Date().toISOString(),
+      sourceType: 'top',
+      mode: 'top-only',
       count: deals.length,
       error: null,
     };
 
     if (announce) {
-      if (explicitQuery) {
-        showToast(
-          deals.length
-            ? `${deals.length} passende deals voor “${explicitQuery}” geladen.`
-            : `Geen actieve deals gevonden voor “${explicitQuery}”.`
-        );
-      } else {
-        showToast(`${deals.length} aanbiedingen geladen.`);
-      }
+      showToast(`${deals.length} actuele topdeals geladen.`);
     }
   } catch (error) {
-    console.error('Live deal loading failed', error);
+    console.error('Top deals loading failed', error);
     deals = [];
     dealOptimization = null;
-    dealFeedCursor = '';
-    dealFeedHasMore = false;
     dealsMeta = {
       status: 'error',
       generatedAt: null,
-      query: explicitQuery || null,
       error: error instanceof Error ? error.message : String(error),
     };
-    if (announce) showToast('Live deals konden niet worden geladen.');
+
+    if (announce) {
+      showToast('Topdeals konden niet worden geladen.');
+    }
   }
 
   render();
-}
-
-async function loadMoreDeals() {
-  if (dealFeedLoadingMore || !dealFeedHasMore || !dealFeedCursor || ui.dealSearch) {
-    return;
-  }
-
-  dealFeedLoadingMore = true;
-  render();
-
-  try {
-    const feed = await loadDealFeed({
-      retailers: effectiveDealRetailers(),
-      category: ui.dealCategory,
-      cursor: dealFeedCursor,
-    });
-
-    deals = normalizeAndMergeDeals(feed.items || [], deals);
-    dealFeedCursor = feed.nextCursor || '';
-    dealFeedHasMore = Boolean(feed.hasMore);
-    dealsMeta = {
-      ...dealsMeta,
-      status: 'live',
-      generatedAt: feed.retrievedAt || dealsMeta.generatedAt,
-      mode: feed.mode || dealsMeta.mode,
-      count: deals.length,
-      error: null,
-    };
-  } catch (error) {
-    console.error('More deals could not be loaded', error);
-    dealsMeta = {
-      ...dealsMeta,
-      status: 'error',
-      error: error instanceof Error ? error.message : String(error),
-    };
-  } finally {
-    dealFeedLoadingMore = false;
-    render();
-  }
 }
 
 function resetDealFeed() {
   deals = [];
   dealOptimization = null;
-  dealFeedCursor = '';
-  dealFeedHasMore = false;
-  dealFeedLoadingMore = false;
 }
 
 function effectiveDealRetailers() {
