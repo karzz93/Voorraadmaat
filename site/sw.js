@@ -1,4 +1,4 @@
-const CACHE_VERSION = 'voorraadmaat-v6.0.0';
+const CACHE_VERSION = 'voorraadmaat-v6.1.0';
 const APP_SHELL = [
   '',
   'index.html',
@@ -9,6 +9,7 @@ const APP_SHELL = [
   'js/recipes.js',
   'js/deals-api.js',
   'js/deals-engine.js',
+  'js/samsung-notes.js',
   'icons/icon-192.png',
   'icons/icon-512.png',
 ];
